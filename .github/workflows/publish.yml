@@ -4,6 +4,11 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      otp:
+        description: "npm 2FA one-time password"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -38,6 +43,6 @@ jobs:
         run: npm run build
 
       - name: Publish package
-        run: npm publish --access public
+        run: npm publish --access public --otp=${{ github.event.inputs.otp }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
