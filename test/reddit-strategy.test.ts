@@ -56,6 +56,7 @@ describe("Reddit extraction strategy", () => {
 
     expect(seenUrls).toHaveLength(1);
     expect(seenUrls[0]).toContain(".json");
+    expect(metadata.ok).toBe(true);
     expect(metadata.title).toBe("JSON Reddit Post");
     expect(metadata.description).toBe("A Reddit post extracted from the JSON endpoint.");
     expect(metadata.author?.name).toBe("u_json");
@@ -66,6 +67,117 @@ describe("Reddit extraction strategy", () => {
     expect(metadata.diagnostics.fallbacksAttempted).toEqual([
       expect.objectContaining({ method: "redditJsonEndpoint", ok: true, statusCode: 200 })
     ]);
+    expect(metadata.diagnostics.providerDiagnostics).toBeUndefined();
+  });
+
+  it("treats a 200 Reddit verification page as a blocked provider response", async () => {
+    const verificationHtml = `
+      <!doctype html>
+      <html>
+        <head>
+          <title>Reddit - Please wait for verification</title>
+          <meta property="og:title" content="Reddit - Please wait for verification">
+        </head>
+        <body>Please wait for verification before continuing.</body>
+      </html>
+    `;
+
+    const metadata = await fetchMetadata("https://www.reddit.com/r/typescript/comments/verify/metanova/", {
+      retries: 0,
+      fetch: async () => new Response(verificationHtml, {
+        status: 200,
+        headers: { "content-type": "text/html" }
+      })
+    });
+
+    expect(metadata.ok).toBe(false);
+    expect(metadata.title).toBeUndefined();
+    expect(metadata.bestImage).toBeUndefined();
+    expect(metadata.images).toHaveLength(0);
+    expect(metadata.confidence).toBe(0);
+    expect(metadata.diagnostics.statusCode).toBe(200);
+    expect(metadata.diagnostics.providerDiagnostics).toMatchObject({
+      platform: "reddit",
+      blocked: true,
+      statusCode: 200,
+      reason: "provider_verification_required",
+      suggestedAction: "retry_on_different_host_or_use_supported_proxy"
+    });
+    expect(metadata.diagnostics.warnings).toContain("Reddit returned a verification/block page; metadata is incomplete.");
+    expect(metadata.diagnostics.fallbacksAttempted).toEqual(expect.arrayContaining([
+      expect.objectContaining({ method: "redditJsonEndpoint", statusCode: 200, blocked: true }),
+      expect.objectContaining({ method: "oldReddit", statusCode: 200, blocked: true }),
+      expect.objectContaining({ method: "redditHtmlFallback", statusCode: 200, blocked: true })
+    ]));
+  });
+
+  it("reports a 403 Reddit JSON endpoint as a blocked provider response when fallbacks fail", async () => {
+    const metadata = await fetchMetadata("https://www.reddit.com/r/typescript/comments/json403/metanova/", {
+      retries: 0,
+      fetch: async (input) => {
+        const url = String(input);
+        if (url.includes(".json")) {
+          return new Response("Forbidden", {
+            status: 403,
+            headers: { "content-type": "text/plain" }
+          });
+        }
+
+        throw new Error("fallback host unavailable");
+      }
+    });
+
+    expect(metadata.ok).toBe(false);
+    expect(metadata.title).toBeUndefined();
+    expect(metadata.diagnostics.providerDiagnostics).toMatchObject({
+      platform: "reddit",
+      blocked: true,
+      statusCode: 403,
+      reason: "provider_blocked_request",
+      suggestedAction: "retry_on_different_host_or_use_supported_proxy"
+    });
+    expect(metadata.diagnostics.warnings).toContain("Reddit returned a verification/block page; metadata is incomplete.");
+    expect(metadata.diagnostics.fallbacksAttempted).toEqual(expect.arrayContaining([
+      expect.objectContaining({ method: "redditJsonEndpoint", statusCode: 403, blocked: true }),
+      expect.objectContaining({ method: "oldReddit", ok: false, error: "fallback host unavailable" }),
+      expect.objectContaining({ method: "redditHtmlFallback", ok: false, error: "fallback host unavailable" })
+    ]));
+  });
+
+  it("detects old.reddit block pages before using them as metadata", async () => {
+    const metadata = await fetchMetadata("https://www.reddit.com/r/typescript/comments/oldblocked/metanova/", {
+      retries: 0,
+      fetch: async (input) => {
+        const url = String(input);
+        if (url.includes(".json")) {
+          return new Response("[]", {
+            status: 200,
+            headers: { "content-type": "application/json" }
+          });
+        }
+
+        if (url.includes("old.reddit.com")) {
+          return new Response("<html><head><title>whoa there, pardner</title></head><body>request has been blocked</body></html>", {
+            status: 200,
+            headers: { "content-type": "text/html" }
+          });
+        }
+
+        throw new Error("reddit html unavailable");
+      }
+    });
+
+    expect(metadata.ok).toBe(false);
+    expect(metadata.title).toBeUndefined();
+    expect(metadata.diagnostics.providerDiagnostics).toMatchObject({
+      platform: "reddit",
+      blocked: true,
+      statusCode: 200,
+      reason: "provider_blocked_request"
+    });
+    expect(metadata.diagnostics.fallbacksAttempted).toEqual(expect.arrayContaining([
+      expect.objectContaining({ method: "oldReddit", statusCode: 200, blocked: true })
+    ]));
   });
 
   it("reports blocked Reddit attempts and retry information", async () => {
@@ -97,6 +209,14 @@ describe("Reddit extraction strategy", () => {
     });
 
     expect(metadata.ok).toBe(false);
+    expect(metadata.title).toBeUndefined();
+    expect(metadata.diagnostics.providerDiagnostics).toMatchObject({
+      platform: "reddit",
+      blocked: true,
+      statusCode: 403,
+      reason: "provider_verification_required",
+      suggestedAction: "retry_on_different_host_or_use_supported_proxy"
+    });
     expect(metadata.diagnostics.fallbacksAttempted).toEqual(expect.arrayContaining([
       expect.objectContaining({ method: "redditJsonEndpoint", statusCode: 429, blocked: true, retryAfter: "30" }),
       expect.objectContaining({ method: "oldReddit", statusCode: 403, blocked: true }),
@@ -107,6 +227,7 @@ describe("Reddit extraction strategy", () => {
       retryAfter: "30",
       retryAfterMs: 30000
     });
+    expect(metadata.diagnostics.warnings).toContain("Reddit returned a verification/block page; metadata is incomplete.");
     expect(metadata.diagnostics.warnings.join(" ")).toContain("blocked");
   });
 });

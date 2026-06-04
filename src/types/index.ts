@@ -152,6 +152,7 @@ export interface ExtractionDiagnostics {
   };
   errors?: string[];
   retryInfo?: ExtractionRetryInfo;
+  providerDiagnostics?: ProviderDiagnostics;
   selectedImageReason?: string;
   confidenceBreakdown?: ConfidenceBreakdown;
   fetchDurationMs?: number;
@@ -174,6 +175,14 @@ export interface ExtractionRetryInfo {
   retryAfter?: string;
   retryAfterMs?: number;
   attempts?: number;
+}
+
+export interface ProviderDiagnostics {
+  platform: string;
+  blocked: boolean;
+  statusCode?: number;
+  reason?: "provider_verification_required" | "provider_blocked_request" | string;
+  suggestedAction?: "retry_on_different_host_or_use_supported_proxy" | string;
 }
 
 export interface ConfidenceBreakdown {

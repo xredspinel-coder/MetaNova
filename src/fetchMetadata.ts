@@ -1,8 +1,11 @@
 import { fetchPage, type FetchedPage } from "./fetcher/index.js";
 import { parseMetadataAsync } from "./parse.js";
-import type { ExtractionFallbackAttempt, ExtractionRetryInfo, FetchMetadataOptions, MediaAsset, UnifiedMetadata } from "./types/index.js";
+import type { ExtractionFallbackAttempt, ExtractionRetryInfo, FetchMetadataOptions, MediaAsset, ProviderDiagnostics, UnifiedMetadata } from "./types/index.js";
 import { detectImageDimensions } from "./utils/imageDimensions.js";
 import { normalizeUrl } from "./utils/url.js";
+
+const REDDIT_BLOCKED_METADATA_WARNING = "Reddit returned a verification/block page; metadata is incomplete.";
+const PROVIDER_BLOCKED_SUGGESTED_ACTION = "retry_on_different_host_or_use_supported_proxy";
 
 interface FetchStrategyResult {
   page: FetchedPage;
@@ -12,6 +15,14 @@ interface FetchStrategyResult {
   sourcePriority?: string[];
   extractionMethod?: string;
   retryInfo?: ExtractionRetryInfo;
+  providerDiagnostics?: ProviderDiagnostics;
+}
+
+type RedditBlockReason = "provider_verification_required" | "provider_blocked_request";
+
+interface RedditFetchAttempt extends ExtractionFallbackAttempt {
+  page?: FetchedPage;
+  blockReason?: RedditBlockReason;
 }
 
 interface RedditPostPayload {
@@ -34,6 +45,10 @@ export async function fetchMetadata(url: string, options: FetchMetadataOptions =
     const requestedUrl = normalizeUrl(url);
     const fetchResult = await fetchPageWithStrategies(requestedUrl, options);
     const page = fetchResult.page;
+    if (fetchResult.providerDiagnostics?.blocked) {
+      return createBlockedProviderMetadata(requestedUrl, fetchResult, Date.now() - startedAt);
+    }
+
     const directMedia = createDirectMediaMetadata(page, requestedUrl, Date.now() - startedAt);
     if (directMedia) {
       return directMedia;
@@ -109,6 +124,68 @@ export async function fetchMetadata(url: string, options: FetchMetadataOptions =
   }
 }
 
+function createBlockedProviderMetadata(
+  requestedUrl: string,
+  fetchResult: FetchStrategyResult,
+  fetchDurationMs: number
+): UnifiedMetadata {
+  const page = fetchResult.page;
+  const providerDiagnostics = fetchResult.providerDiagnostics;
+  const trace = uniqueStrings([
+    ...(page.isShortUrl ? [`detected short URL provider: ${page.shortUrlProvider ?? "unknown"}`] : []),
+    ...(page.redirects.length > 0 ? [`resolved ${page.redirects.length} redirect${page.redirects.length === 1 ? "" : "s"}`] : []),
+    ...fetchResult.trace,
+    "detected blocked provider response"
+  ]);
+  const warnings = uniqueStrings([
+    ...fetchResult.warnings,
+    REDDIT_BLOCKED_METADATA_WARNING,
+    ...(page.statusCode < 200 || page.statusCode >= 300 ? [`Fetch completed with non-success status code ${page.statusCode}.`] : [])
+  ]);
+
+  return {
+    ok: false,
+    url: requestedUrl,
+    finalUrl: page.finalUrl,
+    type: "unknown",
+    siteName: providerDiagnostics?.platform === "reddit" ? "Reddit" : undefined,
+    confidence: 0,
+    completeness: 0,
+    reliability: 0,
+    images: [],
+    videos: [],
+    audio: [],
+    favicons: [],
+    trace,
+    diagnostics: {
+      originalUrl: requestedUrl,
+      finalUrl: page.finalUrl,
+      isShortUrl: page.isShortUrl,
+      shortUrlProvider: page.shortUrlProvider,
+      statusCode: page.statusCode,
+      contentType: page.contentType,
+      redirects: page.redirects,
+      sourcesUsed: [],
+      warnings,
+      fallbacksAttempted: mergeFallbackAttempts(undefined, fetchResult.fallbacksAttempted),
+      trace,
+      sourcePriority: fetchResult.sourcePriority,
+      extractionMethod: fetchResult.extractionMethod,
+      retryInfo: fetchResult.retryInfo,
+      providerDiagnostics,
+      confidenceBreakdown: {
+        title: 0,
+        description: 0,
+        image: 0,
+        structuredData: 0,
+        adapter: 0
+      },
+      fetchDurationMs,
+      extractedAt: new Date().toISOString()
+    }
+  };
+}
+
 async function fetchPageWithStrategies(requestedUrl: string, options: FetchMetadataOptions): Promise<FetchStrategyResult> {
   if (isRedditUrl(requestedUrl)) {
     return fetchRedditPageWithStrategy(requestedUrl, options);
@@ -123,7 +200,7 @@ async function fetchPageWithStrategies(requestedUrl: string, options: FetchMetad
 }
 
 async function fetchRedditPageWithStrategy(requestedUrl: string, options: FetchMetadataOptions): Promise<FetchStrategyResult> {
-  const attempts: Array<ExtractionFallbackAttempt & { page?: FetchedPage }> = [];
+  const attempts: RedditFetchAttempt[] = [];
   const warnings: string[] = [];
   const sourcePriority = ["redditJsonEndpoint", "oldReddit", "embeddedStructuredData", "openGraph", "html"];
   let lastError: unknown;
@@ -137,7 +214,7 @@ async function fetchRedditPageWithStrategy(requestedUrl: string, options: FetchM
     attempts.push(attempt);
     lastError = attempt.error;
 
-    if (attempt.page && attempt.ok && !attempt.blocked) {
+    if (attempt.page && attempt.ok) {
       const redditPost = parseRedditJsonPayload(attempt.page.html);
       if (redditPost?.title) {
         return {
@@ -163,7 +240,7 @@ async function fetchRedditPageWithStrategy(requestedUrl: string, options: FetchM
     attempts.push(attempt);
     lastError = attempt.error;
 
-    if (attempt.page && attempt.ok && !attempt.blocked) {
+    if (attempt.page && attempt.ok) {
       return {
         page: attempt.page,
         fallbacksAttempted: attempts,
@@ -184,11 +261,7 @@ async function fetchRedditPageWithStrategy(requestedUrl: string, options: FetchM
   attempts.push(htmlAttempt);
   lastError = htmlAttempt.error;
 
-  if (htmlAttempt.page) {
-    if (htmlAttempt.blocked) {
-      warnings.push("Reddit HTML fallback appears to have been blocked; metadata may be incomplete.");
-    }
-
+  if (htmlAttempt.page && htmlAttempt.ok) {
     return {
       page: htmlAttempt.page,
       fallbacksAttempted: attempts,
@@ -200,6 +273,24 @@ async function fetchRedditPageWithStrategy(requestedUrl: string, options: FetchM
     };
   }
 
+  if (htmlAttempt.blocked) {
+    warnings.push("Reddit HTML fallback appears to have been blocked; metadata may be incomplete.");
+  }
+
+  const providerDiagnostics = redditProviderDiagnosticsFromAttempts(attempts);
+  if (providerDiagnostics) {
+    return {
+      page: synthesizeRedditBlockedPage(requestedUrl, attempts, providerDiagnostics),
+      fallbacksAttempted: attempts,
+      warnings: uniqueStrings([...warnings, REDDIT_BLOCKED_METADATA_WARNING]),
+      trace: ["Reddit provider blocked metadata extraction"],
+      sourcePriority,
+      extractionMethod: "reddit:blockedProvider",
+      retryInfo: redditRetryInfo(attempts),
+      providerDiagnostics
+    };
+  }
+
   throw lastError ?? new Error("All Reddit extraction fetch attempts failed.");
 }
 
@@ -207,11 +298,12 @@ async function attemptFetch(
   method: string,
   url: string,
   options: FetchMetadataOptions
-): Promise<ExtractionFallbackAttempt & { page?: FetchedPage }> {
+): Promise<RedditFetchAttempt> {
   try {
     const page = await fetchPage(url, options);
     const retryAfter = page.headers["retry-after"];
-    const blocked = isRedditBlocked(page);
+    const blockReason = redditBlockReason(page);
+    const blocked = Boolean(blockReason);
 
     return {
       method,
@@ -219,6 +311,7 @@ async function attemptFetch(
       ok: page.statusCode >= 200 && page.statusCode < 300 && !blocked,
       statusCode: page.statusCode,
       blocked,
+      blockReason,
       retryAfter,
       page
     };
@@ -501,12 +594,75 @@ function synthesizeRedditJsonPage(jsonPage: FetchedPage, requestedUrl: string, p
   };
 }
 
-function isRedditBlocked(page: FetchedPage): boolean {
-  return (
+function redditProviderDiagnosticsFromAttempts(attempts: RedditFetchAttempt[]): ProviderDiagnostics | undefined {
+  const blockedAttempts = attempts.filter((attempt) => attempt.blocked);
+  if (blockedAttempts.length === 0) {
+    return undefined;
+  }
+
+  const selectedAttempt =
+    blockedAttempts.find((attempt) => attempt.blockReason === "provider_verification_required") ??
+    blockedAttempts.at(-1);
+
+  return {
+    platform: "reddit",
+    blocked: true,
+    statusCode: selectedAttempt?.statusCode,
+    reason: selectedAttempt?.blockReason ?? "provider_blocked_request",
+    suggestedAction: PROVIDER_BLOCKED_SUGGESTED_ACTION
+  };
+}
+
+function synthesizeRedditBlockedPage(
+  requestedUrl: string,
+  attempts: RedditFetchAttempt[],
+  providerDiagnostics: ProviderDiagnostics
+): FetchedPage {
+  const selectedPage =
+    attempts.find((attempt) => attempt.blockReason === providerDiagnostics.reason)?.page ??
+    attempts.slice().reverse().find((attempt) => attempt.page)?.page;
+
+  return {
+    url: requestedUrl,
+    originalUrl: requestedUrl,
+    finalUrl: requestedUrl,
+    isShortUrl: selectedPage?.isShortUrl ?? false,
+    shortUrlProvider: selectedPage?.shortUrlProvider,
+    html: "",
+    bytes: new Uint8Array(),
+    statusCode: providerDiagnostics.statusCode ?? selectedPage?.statusCode ?? 403,
+    contentType: selectedPage?.contentType,
+    redirects: selectedPage?.redirects ?? [],
+    headers: selectedPage?.headers ?? {}
+  };
+}
+
+function redditBlockReason(page: FetchedPage): RedditBlockReason | undefined {
+  const title = htmlTitle(page.html);
+  const text = normalizeText(`${title ?? ""} ${page.html}`);
+
+  if (/reddit\s*-\s*please wait for verification/i.test(title ?? "") || /please wait for verification|verification required|verify you are human/i.test(text)) {
+    return "provider_verification_required";
+  }
+
+  if (
     page.statusCode === 403 ||
     page.statusCode === 429 ||
-    /please wait for verification|whoa there, pardner|blocked|forbidden|too many requests|request has been blocked/i.test(page.html)
-  );
+    /whoa there, pardner|request has been blocked|too many requests|forbidden|you're blocked|you are blocked|youre blocked|blocked by network security/i.test(text) ||
+    /^blocked$/i.test(title ?? "")
+  ) {
+    return "provider_blocked_request";
+  }
+
+  return undefined;
+}
+
+function htmlTitle(html: string): string | undefined {
+  return normalizeText(html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]);
+}
+
+function normalizeText(value: string | undefined): string {
+  return value?.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim() ?? "";
 }
 
 function redditRetryInfo(attempts: ExtractionFallbackAttempt[]): ExtractionRetryInfo | undefined {
@@ -550,7 +706,7 @@ function mergeFallbackAttempts(
 
   const seen = new Set<string>();
   return attempts.map((value) => {
-    const { page: _page, ...attempt } = value as ExtractionFallbackAttempt & { page?: FetchedPage };
+    const { page: _page, blockReason: _blockReason, ...attempt } = value as RedditFetchAttempt;
     return attempt;
   }).filter((attempt) => {
     const key = `${attempt.method}:${attempt.url ?? ""}:${attempt.statusCode ?? ""}:${attempt.error ?? ""}`;

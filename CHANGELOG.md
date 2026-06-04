@@ -1,5 +1,15 @@
 # CHANGELOG
 
+## v0.2.1
+
+Release date: 2026-06-04
+
+### Fixed
+
+- Fixed Reddit verification/block pages that returned HTTP 200 being treated as successful metadata.
+- Fixed blocked Reddit fallback handling so provider diagnostics clearly report blocked status, reason, status code, and suggested action.
+- Fixed Reddit verification titles such as `Reddit - Please wait for verification` leaking into `metadata.title`.
+
 ## v0.2.0
 
 Release date: 2026-06-04

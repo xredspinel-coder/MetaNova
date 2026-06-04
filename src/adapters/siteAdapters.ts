@@ -96,8 +96,8 @@ export const redditAdapter: SiteAdapter<PlatformRawData> = {
       type: reddit.isPost ? "social_post" : "website",
       siteName: "Reddit",
       canonicalUrl: context.raw.openGraph.url ?? context.raw.html.canonicalUrl,
-      title: cleanSocialTitle(titleSelection.value),
-      description: descriptionSelection.value,
+      title: cleanRedditTitle(titleSelection.value),
+      description: cleanRedditDescription(descriptionSelection.value),
       images: markAdapterMedia(mediaFromContext(context).images, "redditAdapter"),
       videos: markAdapterMedia(mediaFromContext(context).videos, "redditAdapter"),
       author: username ? { name: username } : entityFromContext(context, ["author", "submitter", "user"]),
@@ -922,6 +922,24 @@ function parseRedditUrl(url: URL): RedditUrlParts {
 
 function cleanSocialTitle(title: string | undefined): string | undefined {
   return title?.replace(/\s*:\s*r\/[A-Za-z0-9_]+$/i, "").trim();
+}
+
+function cleanRedditTitle(title: string | undefined): string | undefined {
+  const cleaned = cleanSocialTitle(title);
+  if (!cleaned || /reddit\s*-\s*please wait for verification|please wait for verification|whoa there, pardner/i.test(cleaned)) {
+    return undefined;
+  }
+
+  return cleaned;
+}
+
+function cleanRedditDescription(description: string | undefined): string | undefined {
+  const cleaned = description?.replace(/\s+/g, " ").trim();
+  if (!cleaned || /please wait for verification|whoa there, pardner|request has been blocked/i.test(cleaned)) {
+    return undefined;
+  }
+
+  return cleaned;
 }
 
 function hostMatches(url: URL, domains: string[]): boolean {
