@@ -2,8 +2,10 @@ import type {
   AdapterExtractionResult,
   ApplicationMetadata,
   ArticleMetadata,
+  ExtractionFallbackAttempt,
   Entity,
   ExtractionDiagnostics,
+  ExtractionRetryInfo,
   ImageScorer,
   JsonLdNode,
   MediaAsset,
@@ -16,7 +18,7 @@ import { firstDefined, parseNumber } from "../utils/html.js";
 import { tryResolveUrl } from "../utils/url.js";
 import { selectBestImage } from "../scorers/image.js";
 import { discoverMedia } from "../media/index.js";
-import { calculateCompleteness, calculateConfidence, calculateReliability } from "../engines/index.js";
+import { calculateCompleteness, calculateConfidence, calculateConfidenceBreakdown, calculateReliability } from "../engines/index.js";
 
 export interface NormalizeContext {
   url?: string;
@@ -88,6 +90,7 @@ export function normalizeMetadata(rawSources: RawMetadataSources, context: Norma
   const type = inferType(rawSources, externalResults, jsonLdNodes, article, product, app, playlist, videos, audio);
   const author = firstResultValue(externalResults, (result) => result.author) ?? firstEntity(article?.authors) ?? entityFromEmbedded(embeddedNodes, ["author", "creator", "owner", "user"]);
   const publisher = article?.publisher ?? firstResultValue(externalResults, (result) => result.publisher) ?? entityFromJsonLd(organizationNode) ?? entityFromEmbedded(embeddedNodes, ["publisher", "provider", "organization"]);
+  const publishDate = firstDefined(article?.publishedTime, video?.publishedTime);
   const sourcesUsed = detectSourcesUsed(rawSources);
   const warnings = diagnosticsWarnings(rawSources, externalResults, context.diagnostics);
   const fieldSources = {
@@ -96,7 +99,7 @@ export function normalizeMetadata(rawSources: RawMetadataSources, context: Norma
     author: fieldSource(rawSources, externalResults, embeddedNodes, "author", selectedImage.best),
     image: fieldSource(rawSources, externalResults, embeddedNodes, "image", selectedImage.best)
   };
-  const confidence = calculateConfidence({
+  const confidenceInput = {
     title,
     description,
     bestImage: selectedImage.best,
@@ -105,7 +108,9 @@ export function normalizeMetadata(rawSources: RawMetadataSources, context: Norma
     rawSources,
     sourcesUsed,
     warnings
-  });
+  };
+  const confidence = calculateConfidence(confidenceInput);
+  const confidenceBreakdown = calculateConfidenceBreakdown(confidenceInput);
   const completeness = calculateCompleteness({
     title,
     description,
@@ -115,7 +120,7 @@ export function normalizeMetadata(rawSources: RawMetadataSources, context: Norma
     author,
     publisher,
     type,
-    publishedTime: article?.publishedTime,
+    publishedTime: publishDate,
     mediaCount: images.length + videos.length + audio.length
   });
   const reliability = calculateReliability({
@@ -135,7 +140,19 @@ export function normalizeMetadata(rawSources: RawMetadataSources, context: Norma
 
   diagnostics.sourcesUsed = uniqueStrings([...diagnostics.sourcesUsed, ...sourcesUsed]);
   diagnostics.warnings = uniqueStrings([...diagnostics.warnings, ...rawSources.jsonLd.warnings, ...externalResults.flatMap((result) => result.warnings ?? [])]);
+  diagnostics.adapterUsed = diagnostics.adapterUsed ?? rawSources.adapters[0]?.source;
+  diagnostics.extractionMethod = diagnostics.extractionMethod ?? adapterRawString(rawSources.adapters[0], "extractionMethod") ?? fieldSources.title;
+  diagnostics.sourcePriority = uniqueStrings([
+    ...(diagnostics.sourcePriority ?? []),
+    ...(arrayOfStrings(rawSources.adapters[0]?.raw?.sourcePriority) ?? [])
+  ]);
+  diagnostics.fallbacksAttempted = mergeFallbackAttempts(
+    diagnostics.fallbacksAttempted,
+    fallbackAttemptsFromUnknown(rawSources.adapters[0]?.raw?.fallbacksAttempted)
+  );
+  diagnostics.retryInfo = diagnostics.retryInfo ?? retryInfoFromUnknown(rawSources.adapters[0]?.raw?.retryInfo);
   diagnostics.selectedImageReason = selectedImage.reason;
+  diagnostics.confidenceBreakdown = confidenceBreakdown;
   diagnostics.originalUrl = diagnostics.originalUrl ?? url;
   diagnostics.finalUrl = diagnostics.finalUrl ?? finalUrl;
   diagnostics.canonicalUrl = canonicalUrl;
@@ -153,6 +170,7 @@ export function normalizeMetadata(rawSources: RawMetadataSources, context: Norma
     type,
     title,
     description,
+    publishDate,
     siteName,
     canonicalUrl,
     confidence,
@@ -528,6 +546,74 @@ function adapterDiagnostics(adapters: AdapterExtractionResult[]): ExtractionDiag
     matched: true,
     name: adapter.source,
     confidence: Math.min(confidence, 100)
+  };
+}
+
+function adapterRawString(adapter: AdapterExtractionResult | undefined, key: string): string | undefined {
+  const value = adapter?.raw?.[key];
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function fallbackAttemptsFromUnknown(value: unknown): ExtractionFallbackAttempt[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const attempts = value.flatMap((item): ExtractionFallbackAttempt[] => {
+    if (!isJsonLdNode(item) || typeof item.method !== "string") {
+      return [];
+    }
+
+    return [{
+      method: item.method,
+      url: typeof item.url === "string" ? item.url : undefined,
+      ok: typeof item.ok === "boolean" ? item.ok : false,
+      statusCode: typeof item.statusCode === "number" ? item.statusCode : undefined,
+      blocked: typeof item.blocked === "boolean" ? item.blocked : undefined,
+      error: typeof item.error === "string" ? item.error : undefined,
+      retryAfter: typeof item.retryAfter === "string" ? item.retryAfter : undefined
+    }];
+  });
+
+  return attempts.length > 0 ? attempts : undefined;
+}
+
+function mergeFallbackAttempts(
+  existing: ExtractionFallbackAttempt[] | undefined,
+  incoming: ExtractionFallbackAttempt[] | undefined
+): ExtractionFallbackAttempt[] | undefined {
+  const attempts = [...(existing ?? []), ...(incoming ?? [])];
+  if (attempts.length === 0) {
+    return undefined;
+  }
+
+  const seen = new Set<string>();
+  return attempts.filter((attempt) => {
+    const key = `${attempt.method}:${attempt.url ?? ""}:${attempt.statusCode ?? ""}:${attempt.error ?? ""}`;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
+
+function retryInfoFromUnknown(value: unknown): ExtractionRetryInfo | undefined {
+  if (!isJsonLdNode(value)) {
+    return undefined;
+  }
+
+  const retryable = typeof value.retryable === "boolean" ? value.retryable : undefined;
+  if (retryable === undefined) {
+    return undefined;
+  }
+
+  return {
+    retryable,
+    reason: typeof value.reason === "string" ? value.reason : undefined,
+    retryAfter: typeof value.retryAfter === "string" ? value.retryAfter : undefined,
+    retryAfterMs: typeof value.retryAfterMs === "number" ? value.retryAfterMs : undefined,
+    attempts: typeof value.attempts === "number" ? value.attempts : undefined
   };
 }
 

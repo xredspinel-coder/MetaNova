@@ -6,6 +6,11 @@ type PlatformRawData = AdapterExtractionResult & {
   identifiers?: Record<string, string | undefined>;
 };
 
+interface TextSelection {
+  value?: string;
+  method?: string;
+}
+
 export const youtubeAdapter: SiteAdapter<PlatformRawData> = {
   name: "youtubeAdapter",
   detect(url) {
@@ -19,8 +24,11 @@ export const youtubeAdapter: SiteAdapter<PlatformRawData> = {
     const videoId = getYouTubeVideoId(url);
     const playlistId = getYouTubePlaylistId(url);
     const communityPostId = getYouTubeCommunityPostId(url);
+    const titleSelection = youtubeTitleFromContext(context, { videoId, playlistId, communityPostId });
+    const descriptionSelection = youtubeDescriptionFromContext(context);
     const channel = entityFromContext(context, ["author", "ownerChannelName", "channel", "owner"]);
     const playlistVideos = playlistId ? extractPlaylistVideos(context) : [];
+    const sourcePriority = youtubeSourcePriority();
 
     return compactAdapterResult({
       source: "youtubeAdapter",
@@ -28,8 +36,8 @@ export const youtubeAdapter: SiteAdapter<PlatformRawData> = {
       type: playlistId ? "playlist" : communityPostId ? "social_post" : "video",
       siteName: "YouTube",
       canonicalUrl: videoId ? `https://www.youtube.com/watch?v=${videoId}` : context.raw.openGraph.url,
-      title: titleFromContext(context, ["videoDetails", "title", "headline", "name", "contentText"]),
-      description: descriptionFromContext(context),
+      title: titleSelection.value,
+      description: descriptionSelection.value,
       videos: markAdapterMedia(mediaFromContext(context).videos, "youtubeAdapter"),
       images: markAdapterMedia(mediaFromContext(context).images, "youtubeAdapter"),
       author: channel,
@@ -37,7 +45,7 @@ export const youtubeAdapter: SiteAdapter<PlatformRawData> = {
       video: videoId
         ? {
             id: videoId,
-            title: titleFromContext(context, ["videoDetails", "title"]),
+            title: titleSelection.value,
             channel,
             publishedTime: publishedTimeFromContext(context),
             duration: findEmbeddedString(context, ["duration", "lengthSeconds", "approxDurationMs"]),
@@ -49,12 +57,16 @@ export const youtubeAdapter: SiteAdapter<PlatformRawData> = {
       playlist: playlistId
         ? {
             id: playlistId,
-            title: findEmbeddedString(context, ["playlistTitle", "playlistName", "title"]) ?? context.raw.openGraph.title,
+            title: youtubePlaylistTitleFromContext(context) ?? context.raw.openGraph.title,
             channel,
             videos: playlistVideos
           }
         : undefined,
-      identifiers: { videoId, playlistId, communityPostId }
+      identifiers: { videoId, playlistId, communityPostId },
+      raw: {
+        sourcePriority,
+        extractionMethod: titleSelection.method ?? descriptionSelection.method ?? "youtube:htmlFallback"
+      }
     });
   },
   normalize(rawData) {
@@ -74,21 +86,28 @@ export const redditAdapter: SiteAdapter<PlatformRawData> = {
     const url = new URL(context.finalUrl);
     const reddit = parseRedditUrl(url);
     const username = typeof reddit.username === "string" ? reddit.username : undefined;
+    const titleSelection = redditTitleFromContext(context);
+    const descriptionSelection = redditDescriptionFromContext(context);
+    const sourcePriority = redditSourcePriority();
 
     return compactAdapterResult({
       source: "redditAdapter",
       platform: "Reddit",
       type: reddit.isPost ? "social_post" : "website",
       siteName: "Reddit",
-      canonicalUrl: context.raw.openGraph.url,
-      title: cleanSocialTitle(titleFromContext(context, ["title", "postTitle", "headline"])),
-      description: descriptionFromContext(context),
+      canonicalUrl: context.raw.openGraph.url ?? context.raw.html.canonicalUrl,
+      title: cleanSocialTitle(titleSelection.value),
+      description: descriptionSelection.value,
       images: markAdapterMedia(mediaFromContext(context).images, "redditAdapter"),
       videos: markAdapterMedia(mediaFromContext(context).videos, "redditAdapter"),
       author: username ? { name: username } : entityFromContext(context, ["author", "submitter", "user"]),
       article: { publishedTime: publishedTimeFromContext(context) },
       identifiers: { subreddit: reddit.subreddit, postId: reddit.postId, username: reddit.username },
-      raw: { ...reddit }
+      raw: {
+        ...reddit,
+        sourcePriority,
+        extractionMethod: titleSelection.method ?? descriptionSelection.method ?? "reddit:htmlFallback"
+      }
     });
   },
   normalize(rawData) {
@@ -196,6 +215,7 @@ export const facebookAdapter: SiteAdapter<PlatformRawData> = {
       platform: "Facebook",
       type: isPhoto ? "image" : isPost || media.images.length > 0 || media.videos.length > 0 ? "social_post" : "website",
       siteName: "Facebook",
+      canonicalUrl: context.raw.openGraph.url,
       title: titleFromContext(context, ["title", "headline", "name"]),
       description: descriptionFromContext(context),
       images: markAdapterMedia(media.images, "facebookAdapter"),
@@ -285,6 +305,143 @@ export const defaultAdapters: SiteAdapter[] = [
   instagramAdapter
 ];
 
+function youtubeSourcePriority(): string[] {
+  return [
+    "structuredData:VideoObject",
+    "embeddedData:ytInitialPlayerResponse",
+    "embeddedData:ytInitialData",
+    "openGraph",
+    "twitter",
+    "html"
+  ];
+}
+
+function youtubeTitleFromContext(
+  context: AdapterContext,
+  ids: { videoId?: string; playlistId?: string; communityPostId?: string }
+): TextSelection {
+  const videoObjectTitle = jsonLdVideoObjectString(context, ["name", "headline"]);
+  if (videoObjectTitle) {
+    return { value: videoObjectTitle, method: "youtube:structuredData.VideoObject" };
+  }
+
+  const playerTitle = youtubePlayerString(context, ["videoDetails.title", "microformat.playerMicroformatRenderer.title"]);
+  if (playerTitle) {
+    return { value: playerTitle, method: "youtube:ytInitialPlayerResponse" };
+  }
+
+  const initialDataTitle = youtubeInitialDataTitle(context, ids);
+  if (initialDataTitle) {
+    return { value: initialDataTitle, method: "youtube:ytInitialData" };
+  }
+
+  if (context.raw.openGraph.title) {
+    return { value: context.raw.openGraph.title, method: "youtube:openGraph" };
+  }
+
+  if (context.raw.twitter.title) {
+    return { value: context.raw.twitter.title, method: "youtube:twitter" };
+  }
+
+  return { value: cleanYouTubeHtmlTitle(context.raw.html.title), method: context.raw.html.title ? "youtube:html" : undefined };
+}
+
+function youtubeDescriptionFromContext(context: AdapterContext): TextSelection {
+  const videoObjectDescription = jsonLdVideoObjectString(context, ["description"]);
+  if (videoObjectDescription) {
+    return { value: videoObjectDescription, method: "youtube:structuredData.VideoObject" };
+  }
+
+  const playerDescription = youtubePlayerString(context, [
+    "videoDetails.shortDescription",
+    "microformat.playerMicroformatRenderer.description",
+    "microformat.playerMicroformatRenderer.shortDescription"
+  ]);
+  if (playerDescription) {
+    return { value: playerDescription, method: "youtube:ytInitialPlayerResponse" };
+  }
+
+  const initialDataDescription = youtubeInitialDataDescription(context);
+  if (initialDataDescription) {
+    return { value: initialDataDescription, method: "youtube:ytInitialData" };
+  }
+
+  if (context.raw.openGraph.description) {
+    return { value: context.raw.openGraph.description, method: "youtube:openGraph" };
+  }
+
+  if (context.raw.twitter.description) {
+    return { value: context.raw.twitter.description, method: "youtube:twitter" };
+  }
+
+  return { value: context.raw.html.description, method: context.raw.html.description ? "youtube:html" : undefined };
+}
+
+function redditSourcePriority(): string[] {
+  return [
+    "redditJsonEndpoint",
+    "oldReddit",
+    "embeddedStructuredData",
+    "openGraph",
+    "twitter",
+    "html"
+  ];
+}
+
+function redditTitleFromContext(context: AdapterContext): TextSelection {
+  const embedded = findEmbeddedStringBySources(context, ["applicationJson", "jsonScript", "initialState", "preloadedState", "nextData"], [
+    "postTitle",
+    "title",
+    "headline"
+  ]);
+  if (embedded) {
+    return { value: embedded, method: hasRedditJsonEndpointPayload(context) ? "reddit:jsonEndpoint" : "reddit:embeddedStructuredData" };
+  }
+
+  const structured = jsonLdStringByType(context.raw.jsonLd.nodes, ["SocialMediaPosting", "DiscussionForumPosting", "Article"], ["headline", "name"]);
+  if (structured) {
+    return { value: structured, method: "reddit:structuredData" };
+  }
+
+  if (context.raw.openGraph.title) {
+    return { value: context.raw.openGraph.title, method: "reddit:openGraph" };
+  }
+
+  if (context.raw.twitter.title) {
+    return { value: context.raw.twitter.title, method: "reddit:twitter" };
+  }
+
+  return { value: context.raw.html.title, method: context.raw.html.title ? "reddit:html" : undefined };
+}
+
+function redditDescriptionFromContext(context: AdapterContext): TextSelection {
+  const embedded = findEmbeddedStringBySources(context, ["applicationJson", "jsonScript", "initialState", "preloadedState", "nextData"], [
+    "description",
+    "selftext",
+    "excerpt",
+    "summary",
+    "body"
+  ]);
+  if (embedded) {
+    return { value: embedded, method: hasRedditJsonEndpointPayload(context) ? "reddit:jsonEndpoint" : "reddit:embeddedStructuredData" };
+  }
+
+  const structured = jsonLdStringByType(context.raw.jsonLd.nodes, ["SocialMediaPosting", "DiscussionForumPosting", "Article"], ["description", "articleBody"]);
+  if (structured) {
+    return { value: structured, method: "reddit:structuredData" };
+  }
+
+  if (context.raw.openGraph.description) {
+    return { value: context.raw.openGraph.description, method: "reddit:openGraph" };
+  }
+
+  if (context.raw.twitter.description) {
+    return { value: context.raw.twitter.description, method: "reddit:twitter" };
+  }
+
+  return { value: context.raw.html.description, method: context.raw.html.description ? "reddit:html" : undefined };
+}
+
 function socialVideoResult(source: string, platform: string, context: AdapterContext): PlatformRawData {
   const url = new URL(context.finalUrl);
   const username = url.pathname.match(/@([^/]+)/)?.[1];
@@ -348,8 +505,184 @@ function markAdapterMedia(assets: MediaAsset[], adapterName: string): MediaAsset
       ...asset.metadata,
       adapter: adapterName,
       originalSource: asset.source
+      }
+    }));
+}
+
+function jsonLdVideoObjectString(context: AdapterContext, keys: string[]): string | undefined {
+  return jsonLdStringByType(context.raw.jsonLd.nodes, ["VideoObject"], keys);
+}
+
+function jsonLdStringByType(nodes: JsonLdNode[], types: string[], keys: string[]): string | undefined {
+  for (const node of nodes) {
+    if (!hasJsonLdType(node, types)) {
+      continue;
     }
-  }));
+
+    for (const key of keys) {
+      const value = stringFromUnknown(node[key]);
+      if (value) {
+        return value;
+      }
+    }
+  }
+
+  return undefined;
+}
+
+function hasJsonLdType(node: JsonLdNode, types: string[]): boolean {
+  const nodeTypes = Array.isArray(node["@type"]) ? node["@type"] : [node["@type"]];
+  return nodeTypes.some((type) => typeof type === "string" && types.some((candidate) => type.toLowerCase().endsWith(candidate.toLowerCase())));
+}
+
+function youtubePlayerString(context: AdapterContext, paths: string[]): string | undefined {
+  for (const item of context.raw.embeddedData.items) {
+    if (item.source !== "youtubePlayerResponse") {
+      continue;
+    }
+
+    for (const path of paths) {
+      const value = stringFromUnknown(valueAtPath(item.data, path));
+      if (value) {
+        return value;
+      }
+    }
+  }
+
+  return undefined;
+}
+
+function youtubeInitialDataTitle(
+  context: AdapterContext,
+  ids: { videoId?: string; playlistId?: string; communityPostId?: string }
+): string | undefined {
+  const items = context.raw.embeddedData.items.filter((item) => item.source === "youtubeInitialData");
+
+  const primary = findRendererText(items, ["videoPrimaryInfoRenderer", "watchMetadata"], ["title"]);
+  if (primary) {
+    return primary;
+  }
+
+  if (ids.videoId) {
+    const matchingVideo = findYouTubeRendererForVideoId(items, ids.videoId, ["title"]);
+    if (matchingVideo) {
+      return matchingVideo;
+    }
+  }
+
+  if (ids.communityPostId) {
+    const communityPost =
+      findEmbeddedStringBySources(context, ["youtubeInitialData"], ["contentText"]) ??
+      findRendererText(items, ["backstagePostRenderer", "postRenderer"], ["contentText", "title"]);
+    if (communityPost) {
+      return communityPost;
+    }
+  }
+
+  if (ids.playlistId && !ids.videoId) {
+    return findRendererText(items, ["playlistMetadataRenderer", "playlistHeaderRenderer"], ["title", "playlistTitle", "name"]);
+  }
+
+  return undefined;
+}
+
+function youtubeInitialDataDescription(context: AdapterContext): string | undefined {
+  const items = context.raw.embeddedData.items.filter((item) => item.source === "youtubeInitialData");
+  return findRendererText(items, ["expandableVideoDescriptionBodyRenderer", "videoSecondaryInfoRenderer", "watchMetadata"], [
+    "description",
+    "attributedDescription",
+    "content"
+  ]);
+}
+
+function youtubePlaylistTitleFromContext(context: AdapterContext): string | undefined {
+  const items = context.raw.embeddedData.items.filter((item) => item.source === "youtubeInitialData");
+  return findRendererText(items, ["playlistMetadataRenderer", "playlistHeaderRenderer"], ["title", "playlistTitle", "name"]);
+}
+
+function findRendererText(items: Array<{ data: JsonLdNode }>, rendererKeys: string[], textKeys: string[]): string | undefined {
+  for (const item of items) {
+    let found: string | undefined;
+
+    walkData(item.data, (value, key) => {
+      if (found || !key || !rendererKeys.includes(key) || !isRecord(value)) {
+        return;
+      }
+
+      for (const textKey of textKeys) {
+        found = stringFromUnknown(value[textKey]);
+        if (found) {
+          return;
+        }
+      }
+    });
+
+    if (found) {
+      return found;
+    }
+  }
+
+  return undefined;
+}
+
+function findYouTubeRendererForVideoId(items: Array<{ data: JsonLdNode }>, videoId: string, textKeys: string[]): string | undefined {
+  for (const item of items) {
+    let found: string | undefined;
+
+    walkData(item.data, (value) => {
+      if (found || !isRecord(value) || stringFromUnknown(value.videoId) !== videoId) {
+        return;
+      }
+
+      for (const textKey of textKeys) {
+        found = stringFromUnknown(value[textKey]);
+        if (found) {
+          return;
+        }
+      }
+    });
+
+    if (found) {
+      return found;
+    }
+  }
+
+  return undefined;
+}
+
+function findEmbeddedStringBySources(context: AdapterContext, sources: string[], keys: string[]): string | undefined {
+  const candidates: string[] = [];
+
+  for (const item of context.raw.embeddedData.items) {
+    if (!sources.includes(item.source)) {
+      continue;
+    }
+
+    walkData(item.data, (value, key) => {
+      if (!key || !matchesKey(key, keys)) {
+        return;
+      }
+
+      const text = stringFromUnknown(value);
+      if (text) {
+        candidates.push(text);
+      }
+    });
+  }
+
+  return bestTextCandidate(candidates);
+}
+
+function hasRedditJsonEndpointPayload(context: AdapterContext): boolean {
+  return context.raw.embeddedData.items.some((item) => item.source === "applicationJson" && item.path === "metanova-reddit-json");
+}
+
+function valueAtPath(node: unknown, path: string): unknown {
+  return path.split(".").reduce<unknown>((current, key) => (isRecord(current) ? current[key] : undefined), node);
+}
+
+function cleanYouTubeHtmlTitle(title: string | undefined): string | undefined {
+  return title?.replace(/\s*-\s*YouTube\s*$/i, "").trim();
 }
 
 function titleFromContext(context: AdapterContext, embeddedKeys: string[]): string | undefined {

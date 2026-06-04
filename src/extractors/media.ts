@@ -2,8 +2,24 @@ import type { MediaAsset } from "../types/index.js";
 import { loadDocument, normalizeWhitespace, parseInteger, parseSrcset, uniqueMediaByUrl } from "../utils/html.js";
 import { tryResolveUrl } from "../utils/url.js";
 
-const LAZY_IMAGE_ATTRIBUTES = ["data-src", "data-original", "data-lazy-src", "data-image", "data-thumbnail"];
-const LAZY_MEDIA_ATTRIBUTES = ["data-src", "data-original", "data-lazy-src", "data-video", "data-media"];
+const LAZY_IMAGE_ATTRIBUTES = [
+  "data-src",
+  "data-original",
+  "data-lazy-src",
+  "data-image",
+  "data-image-url",
+  "data-og-image",
+  "data-thumbnail",
+  "data-thumb",
+  "data-media",
+  "data-full-src",
+  "data-hi-res-src",
+  "data-zoom-src",
+  "data-poster",
+  "data-bg"
+];
+const LAZY_IMAGE_SRCSET_ATTRIBUTES = ["data-srcset", "data-lazy-srcset", "data-original-srcset"];
+const LAZY_MEDIA_ATTRIBUTES = ["data-src", "data-original", "data-lazy-src", "data-video", "data-video-url", "data-media", "data-playback-url"];
 
 export function extractImages(html: string, baseUrl: string): MediaAsset[] {
   const $ = loadDocument(html);
@@ -33,6 +49,16 @@ export function extractImages(html: string, baseUrl: string): MediaAsset[] {
         type,
         metadata: { discoveredFrom: "link.preload" }
       }, baseUrl);
+
+      for (const candidate of parseSrcset($(element).attr("imagesrcset"))) {
+        pushResolved(images, {
+          url: candidate,
+          kind: "image",
+          source: "html",
+          type,
+          metadata: { discoveredFrom: "link.imagesrcset" }
+        }, baseUrl);
+      }
     }
   });
 
@@ -184,7 +210,8 @@ function collectDocumentImages($: ReturnType<typeof loadDocument>, images: Media
     const candidates = [
       normalizeWhitespace($(element).attr("src")),
       ...LAZY_IMAGE_ATTRIBUTES.map((attribute) => normalizeWhitespace($(element).attr(attribute))),
-      ...parseSrcset($(element).attr("srcset"))
+      ...parseSrcset($(element).attr("srcset")),
+      ...LAZY_IMAGE_SRCSET_ATTRIBUTES.flatMap((attribute) => parseSrcset($(element).attr(attribute)))
     ];
 
     for (const candidate of candidates) {
@@ -199,7 +226,10 @@ function collectDocumentImages($: ReturnType<typeof loadDocument>, images: Media
   });
 
   $("picture source[srcset], source[type^='image/'][srcset]").each((_, element) => {
-    for (const candidate of parseSrcset($(element).attr("srcset"))) {
+    for (const candidate of [
+      ...parseSrcset($(element).attr("srcset")),
+      ...LAZY_IMAGE_SRCSET_ATTRIBUTES.flatMap((attribute) => parseSrcset($(element).attr(attribute)))
+    ]) {
       pushResolved(images, {
         url: candidate,
         kind: "image",

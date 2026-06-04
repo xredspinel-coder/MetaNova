@@ -139,7 +139,11 @@ export interface ExtractionDiagnostics {
   contentType?: string;
   redirects: RedirectEntry[];
   sourcesUsed: string[];
+  adapterUsed?: string;
+  sourcePriority?: string[];
+  extractionMethod?: string;
   warnings: string[];
+  fallbacksAttempted?: ExtractionFallbackAttempt[];
   trace: string[];
   adapter?: {
     matched: boolean;
@@ -147,9 +151,37 @@ export interface ExtractionDiagnostics {
     confidence?: number;
   };
   errors?: string[];
+  retryInfo?: ExtractionRetryInfo;
   selectedImageReason?: string;
+  confidenceBreakdown?: ConfidenceBreakdown;
   fetchDurationMs?: number;
   extractedAt: string;
+}
+
+export interface ExtractionFallbackAttempt {
+  method: string;
+  url?: string;
+  ok: boolean;
+  statusCode?: number;
+  blocked?: boolean;
+  error?: string;
+  retryAfter?: string;
+}
+
+export interface ExtractionRetryInfo {
+  retryable: boolean;
+  reason?: string;
+  retryAfter?: string;
+  retryAfterMs?: number;
+  attempts?: number;
+}
+
+export interface ConfidenceBreakdown {
+  title: number;
+  description: number;
+  image: number;
+  structuredData: number;
+  adapter: number;
 }
 
 export interface UnifiedMetadata {
@@ -159,6 +191,7 @@ export interface UnifiedMetadata {
   type: MetadataType;
   title?: string;
   description?: string;
+  publishDate?: string;
   siteName?: string;
   canonicalUrl?: string;
   confidence: number;

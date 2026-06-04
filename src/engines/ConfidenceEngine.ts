@@ -1,4 +1,4 @@
-import type { AdapterExtractionResult, Entity, MediaAsset, RawMetadataSources } from "../types/index.js";
+import type { AdapterExtractionResult, ConfidenceBreakdown, Entity, MediaAsset, RawMetadataSources } from "../types/index.js";
 
 export interface ConfidenceEngineInput {
   title?: string;
@@ -72,6 +72,28 @@ export function calculateConfidence(input: ConfidenceEngineInput): number {
   score -= Math.min(input.warnings.length * 3, 18);
 
   return Math.round(clamp(score, 0, 100));
+}
+
+export function calculateConfidenceBreakdown(input: ConfidenceEngineInput): ConfidenceBreakdown {
+  const title = qualityPoints(input.title, 100, 6, 120);
+  const description = qualityPoints(input.description, 100, 24, 300);
+  const image = input.bestImage
+    ? clamp(58 + Math.min(input.bestImage.score ?? 0, 100) * 0.27 + sourceConfidenceBonus(input.bestImage.source), 0, 100)
+    : 0;
+  const structuredData = input.hasStructuredData
+    ? 100
+    : input.rawSources.embeddedData.items.length > 0
+      ? 55
+      : 0;
+  const adapter = adapterSucceeded(input.rawSources.adapters) ? adapterConfidence(input.rawSources.adapters[0]) : 0;
+
+  return {
+    title: Math.round(title),
+    description: Math.round(description),
+    image: Math.round(image),
+    structuredData: Math.round(structuredData),
+    adapter: Math.round(adapter)
+  };
 }
 
 export function calculateCompleteness(input: CompletenessInput): number {
@@ -162,6 +184,28 @@ function sourceConfidenceBonus(source: string): number {
 
 function adapterSucceeded(adapters: AdapterExtractionResult[]): boolean {
   return adapters.some((adapter) => Boolean(adapter.title || adapter.description || adapter.images?.length || adapter.videos?.length));
+}
+
+function adapterConfidence(adapter: AdapterExtractionResult | undefined): number {
+  if (!adapter) {
+    return 0;
+  }
+
+  let score = 45;
+  if (adapter.title) {
+    score += 22;
+  }
+  if (adapter.description) {
+    score += 14;
+  }
+  if ((adapter.images?.length ?? 0) > 0 || (adapter.videos?.length ?? 0) > 0) {
+    score += 14;
+  }
+  if (adapter.author) {
+    score += 6;
+  }
+
+  return clamp(score, 0, 100);
 }
 
 function clamp(value: number, min: number, max: number): number {

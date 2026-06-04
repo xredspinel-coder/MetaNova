@@ -15,6 +15,11 @@ describe("ConfidenceEngine", () => {
 
     expect(metadata.confidence).toBeGreaterThanOrEqual(90);
     expect(metadata.completeness).toBeGreaterThanOrEqual(80);
+    expect(metadata.diagnostics.confidenceBreakdown).toMatchObject({
+      structuredData: 100
+    });
+    expect(metadata.diagnostics.confidenceBreakdown?.title).toBeGreaterThan(0);
+    expect(metadata.diagnostics.confidenceBreakdown?.image).toBeGreaterThan(0);
   });
 
   it("exposes standalone engine functions", () => {

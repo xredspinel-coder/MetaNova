@@ -1,5 +1,5 @@
 import type { EmbeddedDataItem, JsonLdNode, MediaAsset, RawMetadataSources } from "../types/index.js";
-import { parseNumber, uniqueMediaByUrl } from "../utils/html.js";
+import { parseNumber, parseSrcset, uniqueMediaByUrl } from "../utils/html.js";
 import { tryResolveUrl } from "../utils/url.js";
 
 export interface MediaDiscoveryResult {
@@ -16,17 +16,46 @@ const IMAGE_KEYS = [
   "thumbnailUrl",
   "thumbnail_url",
   "thumbnailSrc",
+  "thumbnail_src",
   "previewImage",
   "preview_image",
+  "preview",
   "ogImage",
+  "og_image",
   "cardImage",
+  "displayUrl",
+  "display_url",
+  "mediaUrl",
+  "media_url",
+  "media_url_https",
+  "fullPicture",
+  "full_picture",
   "cover",
   "coverImage",
+  "cover_image",
+  "original",
+  "source",
   "poster",
+  "posterImage",
   "media"
 ];
 
-const VIDEO_KEYS = ["video", "videos", "videoUrl", "video_url", "contentUrl", "embedUrl", "playbackUrl"];
+const VIDEO_KEYS = [
+  "video",
+  "videos",
+  "videoUrl",
+  "video_url",
+  "contentUrl",
+  "content_url",
+  "embedUrl",
+  "embed_url",
+  "playbackUrl",
+  "playback_url",
+  "fallback_url",
+  "hls_url",
+  "dash_url",
+  "media"
+];
 const AUDIO_KEYS = ["audio", "audios", "audioUrl", "audio_url", "podcastUrl"];
 
 export function discoverMedia(rawSources: RawMetadataSources, finalUrl: string): MediaDiscoveryResult {
@@ -181,9 +210,12 @@ function mediaFromJsonValue(value: unknown, kind: MediaAsset["kind"], source: st
   }
 
   if (isRecord(value)) {
-    const url = stringFromUnknown(value.url) ?? stringFromUnknown(value.src) ?? stringFromUnknown(value.contentUrl) ?? stringFromUnknown(value.thumbnailUrl);
+    const srcset = stringFromUnknown(value.srcset) ?? stringFromUnknown(value.srcSet);
+    const srcsetAssets = parseSrcset(srcset).flatMap((url) => mediaFromJsonValue(url, kind, source));
+    const url = mediaUrlFromRecord(value, kind);
+    const nestedDetails = nestedMediaDetailsRecord(value, kind);
     if (!url || !looksLikeMediaUrl(url, kind)) {
-      return [];
+      return srcsetAssets;
     }
 
     return [
@@ -191,16 +223,80 @@ function mediaFromJsonValue(value: unknown, kind: MediaAsset["kind"], source: st
         url,
         kind,
         source,
-        width: parseNumber(stringFromUnknown(value.width)),
-        height: parseNumber(stringFromUnknown(value.height)),
-        alt: stringFromUnknown(value.alt) ?? stringFromUnknown(value.caption) ?? stringFromUnknown(value.name),
-        title: stringFromUnknown(value.title),
-        type: stringFromUnknown(value.type) ?? stringFromUnknown(value.mimeType) ?? stringFromUnknown(value.encodingFormat)
-      }
+        width: parseNumber(stringFromUnknown(value.width)) ?? parseNumber(stringFromUnknown(nestedDetails?.width)),
+        height: parseNumber(stringFromUnknown(value.height)) ?? parseNumber(stringFromUnknown(nestedDetails?.height)),
+        alt: stringFromUnknown(value.alt) ?? stringFromUnknown(value.caption) ?? stringFromUnknown(value.name) ?? stringFromUnknown(nestedDetails?.alt),
+        title: stringFromUnknown(value.title) ?? stringFromUnknown(nestedDetails?.title),
+        type: stringFromUnknown(value.type) ?? stringFromUnknown(value.mimeType) ?? stringFromUnknown(value.encodingFormat) ?? stringFromUnknown(nestedDetails?.type)
+      },
+      ...srcsetAssets
     ];
   }
 
   return [];
+}
+
+function nestedMediaDetailsRecord(value: JsonLdNode, kind: MediaAsset["kind"]): JsonLdNode | undefined {
+  const candidates = [
+    value.source,
+    value.original,
+    value.image,
+    value.thumbnail,
+    value.thumbnailUrl,
+    value.thumbnail_url,
+    value.previewImage,
+    value.preview_image,
+    value.video,
+    value.reddit_video
+  ];
+
+  return candidates.find((candidate): candidate is JsonLdNode => isRecord(candidate) && Boolean(mediaUrlFromRecord(candidate, kind)));
+}
+
+function mediaUrlFromRecord(value: JsonLdNode, kind: MediaAsset["kind"]): string | undefined {
+  const commonCandidates = [
+    value.url,
+    value.src,
+    value.secure_url,
+    value.secureUrl,
+    value.contentUrl,
+    value.content_url,
+    value.embedUrl,
+    value.embed_url,
+    value.thumbnailUrl,
+    value.thumbnail_url,
+    value.thumbnailSrc,
+    value.thumbnail_src,
+    value.mediaUrl,
+    value.media_url,
+    value.media_url_https,
+    value.displayUrl,
+    value.display_url,
+    value.fullPicture,
+    value.full_picture,
+    value.previewImage,
+    value.preview_image,
+    value.poster,
+    value.posterUrl,
+    value.poster_url,
+    value.coverImage,
+    value.cover_image,
+    value.original,
+    value.source
+  ];
+
+  const videoCandidates = [
+    value.videoUrl,
+    value.video_url,
+    value.playbackUrl,
+    value.playback_url,
+    value.fallback_url,
+    value.hls_url,
+    value.dash_url
+  ];
+
+  const candidates = kind === "video" ? [...videoCandidates, ...commonCandidates] : commonCandidates;
+  return candidates.map(stringFromUnknown).find((candidate) => candidate && looksLikeMediaUrl(candidate, kind));
 }
 
 function assetFromEmbedded(value: string, kind: MediaAsset["kind"], item: EmbeddedDataItem, parent: JsonLdNode | undefined): MediaAsset {
@@ -299,7 +395,7 @@ function shouldIgnoreMediaUrl(url: string): boolean {
     normalized.startsWith("data:") ||
     normalized.startsWith("blob:") ||
     normalized.startsWith("javascript:") ||
-    /(?:sprite|spacer|blank|transparent|placeholder|tracking|beacon|pixel|emoji)(?:[._/-]|$|\?)/i.test(normalized) ||
+    /(?:sprite|spacer|blank|transparent|placeholder|tracking|beacon|pixel|emoji|favicon|apple-touch-icon)(?:[._/-]|$|\?)/i.test(normalized) ||
     /(?:^|[/?_-])1x1(?:[._/-]|$|\?)/i.test(normalized)
   );
 }
@@ -311,11 +407,15 @@ function looksLikeMediaUrl(value: string, kind: MediaAsset["kind"]): boolean {
 
   if (/^https?:\/\//i.test(value) || value.startsWith("/") || value.startsWith("./") || value.startsWith("../")) {
     if (kind === "image") {
-      return /\.(?:avif|webp|png|jpe?g|gif)(?:[?#].*)?$/i.test(value) || /(?:image|thumb|thumbnail|cover|poster|preview|media|og|card|photo)/i.test(value);
+      return (
+        /\.(?:avif|webp|png|jpe?g|gif)(?:[?#].*)?$/i.test(value) ||
+        /(?:image|thumb|thumbnail|cover|poster|preview|media|og|card|photo|format=(?:jpg|jpeg|png|webp))/i.test(value) ||
+        /(?:ytimg\.com|i\.redd\.it|preview\.redd\.it|external-preview\.redd\.it|pbs\.twimg\.com|pinimg\.com|cdninstagram\.com|fbcdn\.net|tiktokcdn\.com|behance\.net)/i.test(value)
+      );
     }
 
     if (kind === "video") {
-      return /\.(?:mp4|webm|m3u8|mov)(?:[?#].*)?$/i.test(value) || /(?:video|embed|player|watch|reel|shorts)/i.test(value);
+      return /\.(?:mp4|webm|m3u8|mov)(?:[?#].*)?$/i.test(value) || /(?:video|embed|player|watch|reel|shorts|v\.redd\.it)/i.test(value);
     }
 
     if (kind === "audio") {

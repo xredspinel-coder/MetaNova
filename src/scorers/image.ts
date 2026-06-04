@@ -7,11 +7,11 @@ export interface ImageSelection {
 }
 
 const SOURCE_WEIGHT: Record<string, number> = {
-  adapter: 96,
-  openGraph: 92,
+  adapter: 98,
+  openGraph: 94,
   oEmbed: 88,
   jsonLd: 82,
-  twitter: 78,
+  twitter: 86,
   nextData: 76,
   nuxt: 74,
   initialState: 73,
@@ -44,7 +44,12 @@ export function scoreImages(images: MediaAsset[], customScorers: ImageScorer[] =
         }
       };
     })
-    .sort((left, right) => (right.score ?? 0) - (left.score ?? 0));
+    .sort(
+      (left, right) =>
+        (right.score ?? 0) - (left.score ?? 0) ||
+        sourceSortWeight(right) - sourceSortWeight(left) ||
+        imageArea(right) - imageArea(left)
+    );
 }
 
 export function selectBestImage(images: MediaAsset[], customScorers: ImageScorer[] = []): ImageSelection {
@@ -165,18 +170,38 @@ function scoreFormat(image: MediaAsset): { score: number; reasons: string[] } {
 
 function scoreUrlSignal(image: MediaAsset): { score: number; reasons: string[] } {
   const url = image.url.toLowerCase();
-  const matches = url.match(/cover|preview|thumbnail|thumb|og|card|media|hero|share|social/g) ?? [];
+  const matches = url.match(/cover|preview|thumbnail|thumb|og|card|media|hero|share|social|maxres|highres|large|original/g) ?? [];
 
-  if (matches.length === 0) {
+  const platformScore = platformThumbnailScore(url);
+  if (matches.length === 0 && platformScore.score === 0) {
     return { score: 0, reasons: [] };
   }
 
   const uniqueMatches = [...new Set(matches)];
-  const score = Math.min(uniqueMatches.length * 4, 12);
+  const score = Math.min(uniqueMatches.length * 4, 14) + platformScore.score;
+  const reasons = uniqueMatches.length > 0 ? [`URL matched preview hints (${uniqueMatches.join(", ")}) and added ${Math.min(uniqueMatches.length * 4, 14)} points`] : [];
+  reasons.push(...platformScore.reasons);
+
   return {
     score,
-    reasons: [`URL matched preview hints (${uniqueMatches.join(", ")}) and added ${score} points`]
+    reasons
   };
+}
+
+function platformThumbnailScore(url: string): { score: number; reasons: string[] } {
+  if (/ytimg\.com\/vi\/[^/]+\/(?:maxresdefault|sddefault|hqdefault)/i.test(url)) {
+    return { score: 12, reasons: ["YouTube platform thumbnail added 12 points"] };
+  }
+
+  if (/(?:i|preview|external-preview)\.redd\.it|v\.redd\.it/i.test(url)) {
+    return { score: 10, reasons: ["Reddit media host added 10 points"] };
+  }
+
+  if (/pbs\.twimg\.com\/media|pinimg\.com|cdninstagram\.com|fbcdn\.net|tiktokcdn\.com|mir-s3-cdn-cf\.behance\.net/i.test(url)) {
+    return { score: 8, reasons: ["social platform media host added 8 points"] };
+  }
+
+  return { score: 0, reasons: [] };
 }
 
 function scoreUrlPenalty(image: MediaAsset): number {
@@ -270,6 +295,14 @@ function countDuplicates(images: MediaAsset[]): Map<string, number> {
     counts.set(key, (counts.get(key) ?? 0) + 1);
   }
   return counts;
+}
+
+function imageArea(image: MediaAsset): number {
+  return (image.width ?? 0) * (image.height ?? 0);
+}
+
+function sourceSortWeight(image: MediaAsset): number {
+  return SOURCE_WEIGHT[image.source] ?? 50;
 }
 
 function mediaSignature(url: string): string {
