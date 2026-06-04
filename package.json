@@ -1,0 +1,70 @@
+{
+  "name": "metanova",
+  "version": "0.1.0",
+  "description": "A modular TypeScript metadata extraction and normalization library for web pages and public URLs.",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "USAGE_GUIDE.md",
+    "LICENSE",
+    "examples"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsup src/index.ts --format esm,cjs --dts --sourcemap --clean",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "eslint \"src/**/*.ts\" \"test/**/*.ts\" \"examples/**/*.mjs\" \"examples/**/*.cjs\""
+  },
+  "keywords": [
+    "metadata",
+    "open-graph",
+    "twitter-cards",
+    "json-ld",
+    "schema.org",
+    "oembed",
+    "link-preview",
+    "scraping",
+    "preview-card",
+    "social-media",
+    "nextjs",
+    "metadata-extraction",
+    "ssrf-protection"
+  ],
+  "author": "MetaNova Contributors",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xredspinel-coder/MetaNova.git"
+  },
+  "homepage": "https://github.com/xredspinel-coder/MetaNova#readme",
+  "bugs": {
+    "url": "https://github.com/xredspinel-coder/MetaNova/issues"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.18"
+  },
+  "dependencies": {
+    "cheerio": "^1.1.2"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.1",
+    "@types/node": "^24.10.1",
+    "eslint": "^9.39.1",
+    "tsup": "^8.5.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.46.4",
+    "vitest": "^4.0.8"
+  }
+}
