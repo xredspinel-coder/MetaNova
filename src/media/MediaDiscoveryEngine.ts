@@ -1,5 +1,6 @@
 import type { EmbeddedDataItem, JsonLdNode, MediaAsset, RawMetadataSources } from "../types/index.js";
 import { parseNumber, parseSrcset, uniqueMediaByUrl } from "../utils/html.js";
+import { filterRedditImageCandidates, isRedditUrl, redditImagePriority } from "../utils/redditMedia.js";
 import { tryResolveUrl } from "../utils/url.js";
 
 export interface MediaDiscoveryResult {
@@ -115,8 +116,10 @@ export function discoverMedia(rawSources: RawMetadataSources, finalUrl: string):
     trace.push("media discovery included adapter and plugin media");
   }
 
+  const dedupedImages = dedupeMediaBySignature(images);
+
   return {
-    images: dedupeMediaBySignature(uniqueMediaByUrl(images)),
+    images: isRedditUrl(finalUrl) ? filterRedditImageCandidates(dedupedImages) : dedupedImages,
     videos: dedupeMediaBySignature(uniqueMediaByUrl(videos)),
     audio: dedupeMediaBySignature(uniqueMediaByUrl(audio)),
     trace
@@ -227,7 +230,8 @@ function mediaFromJsonValue(value: unknown, kind: MediaAsset["kind"], source: st
         height: parseNumber(stringFromUnknown(value.height)) ?? parseNumber(stringFromUnknown(nestedDetails?.height)),
         alt: stringFromUnknown(value.alt) ?? stringFromUnknown(value.caption) ?? stringFromUnknown(value.name) ?? stringFromUnknown(nestedDetails?.alt),
         title: stringFromUnknown(value.title) ?? stringFromUnknown(nestedDetails?.title),
-        type: stringFromUnknown(value.type) ?? stringFromUnknown(value.mimeType) ?? stringFromUnknown(value.encodingFormat) ?? stringFromUnknown(nestedDetails?.type)
+        type: stringFromUnknown(value.type) ?? stringFromUnknown(value.mimeType) ?? stringFromUnknown(value.encodingFormat) ?? stringFromUnknown(nestedDetails?.type),
+        metadata: isRecord(value.metadata) ? value.metadata : undefined
       },
       ...srcsetAssets
     ];
@@ -347,7 +351,7 @@ function dedupeMediaBySignature(assets: MediaAsset[]): MediaAsset[] {
   for (const asset of assets) {
     const key = mediaSignature(asset.url);
     const current = seen.get(key);
-    if (!current || sourceRank(asset.source) > sourceRank(current.source)) {
+    if (!current || mediaRank(asset) > mediaRank(current)) {
       seen.set(key, asset);
     }
   }
@@ -387,6 +391,11 @@ function sourceRank(source: string): number {
   };
 
   return ranks[source] ?? 50;
+}
+
+function mediaRank(asset: MediaAsset): number {
+  const redditPriority = redditImagePriority(asset);
+  return redditPriority > 0 ? 1_000 + redditPriority : sourceRank(asset.source);
 }
 
 function shouldIgnoreMediaUrl(url: string): boolean {

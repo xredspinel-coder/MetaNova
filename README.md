@@ -3,6 +3,13 @@
 [![npm version](https://img.shields.io/npm/v/metanova.svg)](https://www.npmjs.com/package/metanova)
 [![License](https://img.shields.io/npm/l/metanova.svg)](https://www.npmjs.com/package/metanova)
 [![TypeScript](https://img.shields.io/badge/TypeScript-Ready-blue)](https://www.typescriptlang.org/)
+[![Live Explorer](https://img.shields.io/badge/Explorer-Live-ff3b6b)](https://meta-nova-explorer.vercel.app/)
+
+## Live Explorer
+
+Try MetaNova Explorer:
+
+https://meta-nova-explorer.vercel.app/
 
 MetaNova is a modular JavaScript and TypeScript library for extracting, analyzing, scoring, and normalizing metadata from web pages and public URLs.
 

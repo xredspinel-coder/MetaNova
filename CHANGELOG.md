@@ -1,5 +1,22 @@
 # CHANGELOG
 
+## v0.2.2
+
+Release date: 2026-06-05
+
+### Changed
+
+- Improved Reddit image extraction quality by filtering tiny thumbnails, community chrome, avatar/icon/award/emoji assets, and unrelated page preview media.
+- Improved Reddit media prioritization so gallery images, `preview.redd.it`, and `i.redd.it` media are preferred over external previews and thumbnail hosts.
+- Improved TikTok post extraction by using the real video detail payload when available and rejecting generic TikTok Shop/navigation template titles.
+- Kept normalized media collections (`images`, `videos`, `audio`, and `favicons`) present as arrays even when empty.
+
+### Fixed
+
+- Fixed multi-image Reddit posts returning only social preview images instead of ordered gallery media.
+- Fixed successful old.reddit fallback diagnostics so blocked Reddit JSON attempts are reported as informational fallback trace entries instead of warnings.
+- Fixed preview card handling so a valid `bestImage` is always available to consumers even when image candidate arrays are empty.
+
 ## v0.2.1
 
 Release date: 2026-06-04

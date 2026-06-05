@@ -49,4 +49,92 @@ describe("site adapters", () => {
     expect(instagram.type).toBe("social_post");
     expect(instagram.siteName).toBe("Instagram");
   });
+
+  it("uses TikTok video detail payload instead of generic Shop templates", () => {
+    const metadata = parseMetadata(`
+      <html>
+        <head>
+          <title>TikTok - Make Your Day</title>
+        </head>
+        <body>
+          <script type="application/json">
+            {"title":"Check out {s_keywords} selection on TikTok Shop and get free shipping on eligible items. Discover trending items and exclusive collections!"}
+          </script>
+          <script type="application/json" id="__UNIVERSAL_DATA_FOR_REHYDRATION__">
+            {
+              "__DEFAULT_SCOPE__": {
+                "webapp.video-detail": {
+                  "itemInfo": {
+                    "itemStruct": {
+                      "id": "7000000000000000001",
+                      "desc": "Take You to Hell - Ava Max #music #takeyoutohell #avamax #lyrics #fyp ",
+                      "createTime": "1777085736",
+                      "author": {
+                        "uniqueId": "example.user",
+                        "nickname": "Zizi Ziza"
+                      },
+                      "stats": {
+                        "playCount": "12345"
+                      },
+                      "music": {
+                        "title": "Take You To Hell",
+                        "authorName": "Ava Max"
+                      },
+                      "video": {
+                        "id": "7000000000000000001",
+                        "width": 1024,
+                        "height": 576,
+                        "duration": 164,
+                        "originCover": "https://p16-common-sign.tiktokcdn.com/video-cover.image",
+                        "playAddr": "https://v16-webapp-prime.tiktok.com/video.mp4",
+                        "PlayAddrStruct": {
+                          "UrlList": ["https://v19-webapp-prime.tiktok.com/video.mp4"]
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          </script>
+        </body>
+      </html>
+    `, "https://www.tiktok.com/@example.user/video/7000000000000000001");
+
+    expect(metadata.type).toBe("social_post");
+    expect(metadata.title).toBe("Take You to Hell - Ava Max #music #takeyoutohell #avamax #lyrics #fyp");
+    expect(metadata.description).toBe("Take You to Hell - Ava Max #music #takeyoutohell #avamax #lyrics #fyp");
+    expect(metadata.title).not.toContain("{s_keywords}");
+    expect(metadata.bestImage).toBe("https://p16-common-sign.tiktokcdn.com/video-cover.image");
+    expect(metadata.videos.map((video) => video.url)).toEqual(expect.arrayContaining([
+      "https://v16-webapp-prime.tiktok.com/video.mp4",
+      "https://v19-webapp-prime.tiktok.com/video.mp4"
+    ]));
+    expect(metadata.author?.name).toBe("Zizi Ziza");
+    expect(metadata.video).toMatchObject({
+      id: "7000000000000000001",
+      duration: "164",
+      viewCount: 12345
+    });
+  });
+
+  it("does not use generic TikTok navigation titles for photo fallbacks", () => {
+    const metadata = parseMetadata(`
+      <script type="application/json">
+        {
+          "__DEFAULT_SCOPE__": {
+            "webapp.biz-context": {
+              "navList": [
+                { "title": "TikTok LIVE Creator Networks" }
+              ]
+            }
+          }
+        }
+      </script>
+    `, "https://www.tiktok.com/@examplephoto/photo/7000000000000000002");
+
+    expect(metadata.title).toBe("TikTok post by @examplephoto");
+    expect(metadata.title).not.toBe("TikTok LIVE Creator Networks");
+    expect(metadata.diagnostics.extractionMethod).toBe("tiktok:urlFallback");
+  });
 });

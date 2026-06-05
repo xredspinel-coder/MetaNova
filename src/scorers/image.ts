@@ -1,4 +1,5 @@
 import type { ImageScorer, MediaAsset } from "../types/index.js";
+import { hasRedditImageContext, isRedditMediaUrl, redditImagePriority } from "../utils/redditMedia.js";
 
 export interface ImageSelection {
   best?: MediaAsset;
@@ -26,6 +27,7 @@ const SOURCE_WEIGHT: Record<string, number> = {
 
 export function scoreImages(images: MediaAsset[], customScorers: ImageScorer[] = []): MediaAsset[] {
   const duplicateCounts = countDuplicates(images);
+  const redditContext = hasRedditImageContext(images);
 
   return images
     .map((image, index) => {
@@ -46,6 +48,7 @@ export function scoreImages(images: MediaAsset[], customScorers: ImageScorer[] =
     })
     .sort(
       (left, right) =>
+        (redditContext ? redditImagePriority(right) - redditImagePriority(left) : 0) ||
         (right.score ?? 0) - (left.score ?? 0) ||
         sourceSortWeight(right) - sourceSortWeight(left) ||
         imageArea(right) - imageArea(left)
@@ -69,16 +72,18 @@ function scoreImageWithDetails(image: MediaAsset, index: number, images: MediaAs
   const dimensions = scoreDimensions(image);
   const format = scoreFormat(image);
   const urlSignal = scoreUrlSignal(image);
+  const redditMedia = scoreRedditMedia(image);
   const urlPenalty = scoreUrlPenalty(image);
   const duplicatePenalty = scoreDuplicatePenalty(image, duplicateCounts);
 
   score += dimensions.score;
   score += format.score;
   score += urlSignal.score;
+  score += redditMedia.score;
   score -= urlPenalty;
   score -= duplicatePenalty.score;
   score -= Math.min(index * 1.5, 10);
-  reasons.push(...dimensions.reasons, ...format.reasons, ...urlSignal.reasons, ...duplicatePenalty.reasons);
+  reasons.push(...dimensions.reasons, ...format.reasons, ...urlSignal.reasons, ...redditMedia.reasons, ...duplicatePenalty.reasons);
 
   if (images.length === 1) {
     score += 4;
@@ -199,6 +204,42 @@ function platformThumbnailScore(url: string): { score: number; reasons: string[]
 
   if (/pbs\.twimg\.com\/media|pinimg\.com|cdninstagram\.com|fbcdn\.net|tiktokcdn\.com|mir-s3-cdn-cf\.behance\.net/i.test(url)) {
     return { score: 8, reasons: ["social platform media host added 8 points"] };
+  }
+
+  return { score: 0, reasons: [] };
+}
+
+function scoreRedditMedia(image: MediaAsset): { score: number; reasons: string[] } {
+  const priority = redditImagePriority(image);
+  if (priority === 0 && !isRedditMediaUrl(image.url)) {
+    return { score: 0, reasons: [] };
+  }
+
+  const url = image.url.toLowerCase();
+  const mediaKind = typeof image.metadata?.redditMediaKind === "string" ? image.metadata.redditMediaKind : undefined;
+
+  if (mediaKind === "gallery") {
+    return { score: 24, reasons: ["Reddit gallery media added 24 points"] };
+  }
+
+  if (mediaKind === "previewOriginal") {
+    return { score: 20, reasons: ["Reddit original preview media added 20 points"] };
+  }
+
+  if (/\/\/i\.redd\.it\//i.test(url)) {
+    return { score: 18, reasons: ["Reddit direct image media added 18 points"] };
+  }
+
+  if (/\/\/preview\.redd\.it\//i.test(url)) {
+    return { score: 16, reasons: ["Reddit preview media added 16 points"] };
+  }
+
+  if (/\/\/external-preview\.redd\.it\//i.test(url)) {
+    return { score: -8, reasons: ["Reddit external preview media subtracted 8 points"] };
+  }
+
+  if (/\/\/thumbs\.redditmedia\.com\//i.test(url)) {
+    return { score: -60, reasons: ["Reddit thumbnail host subtracted 60 points"] };
   }
 
   return { score: 0, reasons: [] };

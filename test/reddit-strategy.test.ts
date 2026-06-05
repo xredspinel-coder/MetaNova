@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { fetchMetadata } from "../src/index.js";
+import { fetchMetadata, parseMetadata } from "../src/index.js";
 
 describe("Reddit extraction strategy", () => {
   it("uses the official JSON endpoint before HTML fallbacks", async () => {
@@ -68,6 +68,167 @@ describe("Reddit extraction strategy", () => {
       expect.objectContaining({ method: "redditJsonEndpoint", ok: true, statusCode: 200 })
     ]);
     expect(metadata.diagnostics.providerDiagnostics).toBeUndefined();
+  });
+
+  it("returns ordered Reddit gallery images and ignores thumbnails", async () => {
+    const metadata = await fetchMetadata("https://www.reddit.com/r/pics/comments/gallery123/gallery_post/", {
+      fetch: async () => new Response(JSON.stringify([
+        {
+          data: {
+            children: [
+              {
+                kind: "t3",
+                data: {
+                  id: "gallery123",
+                  title: "Gallery Reddit Post",
+                  permalink: "/r/pics/comments/gallery123/gallery_post/",
+                  thumbnail: "https://b.thumbs.redditmedia.com/tiny-thumb.jpg",
+                  gallery_data: {
+                    items: [
+                      { media_id: "one" },
+                      { media_id: "two" }
+                    ]
+                  },
+                  media_metadata: {
+                    one: {
+                      status: "valid",
+                      e: "Image",
+                      m: "image/jpg",
+                      s: {
+                        u: "https://preview.redd.it/gallery-one.jpg?width=1600&amp;format=pjpg",
+                        x: 1600,
+                        y: 900
+                      }
+                    },
+                    two: {
+                      status: "valid",
+                      e: "Image",
+                      m: "image/png",
+                      s: {
+                        u: "https://preview.redd.it/gallery-two.png?width=1200&amp;format=png",
+                        x: 1200,
+                        y: 800
+                      }
+                    }
+                  },
+                  preview: {
+                    images: [
+                      {
+                        source: {
+                          url: "https://external-preview.redd.it/social-preview.jpg",
+                          width: 1200,
+                          height: 630
+                        },
+                        resolutions: [
+                          {
+                            url: "https://preview.redd.it/small-resolution.jpg?width=140",
+                            width: 140,
+                            height: 140
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      })
+    });
+
+    expect(metadata.bestImage).toBe("https://preview.redd.it/gallery-one.jpg?width=1600&format=pjpg");
+    expect(metadata.images.map((image) => image.url)).toEqual([
+      "https://preview.redd.it/gallery-one.jpg?width=1600&format=pjpg",
+      "https://preview.redd.it/gallery-two.png?width=1200&format=png",
+      "https://external-preview.redd.it/social-preview.jpg"
+    ]);
+    expect(metadata.images.map((image) => image.url).join(" ")).not.toContain("thumbs.redditmedia.com");
+    expect(metadata.images.map((image) => image.url).join(" ")).not.toContain("small-resolution");
+  });
+
+  it("filters Reddit page chrome and prioritizes real post media", () => {
+    const metadata = parseMetadata(`
+      <html>
+        <head>
+          <title>Old Reddit post</title>
+          <meta property="og:site_name" content="Reddit">
+          <meta property="og:title" content="Old Reddit post">
+          <meta property="og:image" content="https://external-preview.redd.it/og-social-card.jpg">
+          <meta property="og:image:width" content="1200">
+          <meta property="og:image:height" content="630">
+        </head>
+        <body>
+          <img src="https://styles.redditmedia.com/community_icon_t5_abc.png" width="512" height="512">
+          <img src="https://a.thumbs.redditmedia.com/sidebar-thumb.jpg" width="320" height="320">
+          <img src="https://preview.redd.it/tiny-post.jpg" width="140" height="140">
+          <script type="application/json">
+            {
+              "post": {
+                "title": "Old Reddit post",
+                "images": [
+                  {
+                    "url": "https://preview.redd.it/actual-post-image.jpg",
+                    "width": 1200,
+                    "height": 900,
+                    "redditMediaKind": "previewOriginal"
+                  }
+                ]
+              }
+            }
+          </script>
+        </body>
+      </html>
+    `, "https://old.reddit.com/r/pics/comments/abc123/old_reddit_post/");
+
+    expect(metadata.bestImage).toBe("https://preview.redd.it/actual-post-image.jpg");
+    expect(metadata.images.map((image) => image.url)).toEqual([
+      "https://preview.redd.it/actual-post-image.jpg",
+      "https://external-preview.redd.it/og-social-card.jpg"
+    ]);
+  });
+
+  it("classifies a blocked Reddit JSON endpoint as informational when old.reddit succeeds", async () => {
+    const metadata = await fetchMetadata("https://www.reddit.com/r/typescript/comments/oldsuccess/metanova/", {
+      retries: 0,
+      fetch: async (input) => {
+        const url = String(input);
+        if (url.includes(".json")) {
+          return new Response("Forbidden", {
+            status: 403,
+            headers: { "content-type": "text/plain" }
+          });
+        }
+
+        return new Response(`
+          <html>
+            <head>
+              <title>Old Reddit Success</title>
+              <meta property="og:site_name" content="Reddit">
+              <meta property="og:title" content="Old Reddit Success">
+              <meta property="og:image" content="https://preview.redd.it/old-success.jpg">
+              <meta property="og:image:width" content="1200">
+              <meta property="og:image:height" content="630">
+            </head>
+          </html>
+        `, {
+          status: 200,
+          headers: { "content-type": "text/html" }
+        });
+      }
+    });
+
+    expect(metadata.ok).toBe(true);
+    expect(metadata.bestImage).toBe("https://preview.redd.it/old-success.jpg");
+    expect(metadata.diagnostics.warnings).not.toContain("Reddit JSON endpoint appears to have blocked access.");
+    expect(metadata.diagnostics.trace).toContain("Informational fallback: Reddit JSON endpoint appears to have blocked access; continuing with fallback extraction.");
+    expect(metadata.diagnostics.fallbacksAttempted).toEqual(expect.arrayContaining([
+      expect.objectContaining({ method: "redditJsonEndpoint", statusCode: 403, blocked: true }),
+      expect.objectContaining({ method: "oldReddit", statusCode: 200, ok: true })
+    ]));
   });
 
   it("treats a 200 Reddit verification page as a blocked provider response", async () => {

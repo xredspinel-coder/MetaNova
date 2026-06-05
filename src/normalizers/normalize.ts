@@ -163,7 +163,7 @@ export function normalizeMetadata(rawSources: RawMetadataSources, context: Norma
     ...(selectedImage.best ? [`selected image from ${sourceLabel(selectedImage.best)}`] : [])
   ]);
 
-  return stripUndefined({
+  const normalized = stripUndefined({
     ok: true,
     url,
     finalUrl,
@@ -193,6 +193,14 @@ export function normalizeMetadata(rawSources: RawMetadataSources, context: Norma
     diagnostics,
     trace: diagnostics.trace
   }) as UnifiedMetadata;
+
+  normalized.images = selectedImage.images;
+  normalized.videos = videos;
+  normalized.audio = audio;
+  normalized.favicons = favicons;
+  normalized.trace = diagnostics.trace;
+
+  return normalized;
 }
 
 function normalizeAssets(assets: MediaAsset[], baseUrl: string): MediaAsset[] {

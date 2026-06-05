@@ -2,6 +2,7 @@ import { fetchPage, type FetchedPage } from "./fetcher/index.js";
 import { parseMetadataAsync } from "./parse.js";
 import type { ExtractionFallbackAttempt, ExtractionRetryInfo, FetchMetadataOptions, MediaAsset, ProviderDiagnostics, UnifiedMetadata } from "./types/index.js";
 import { detectImageDimensions } from "./utils/imageDimensions.js";
+import { isAllowedRedditImageCandidate, prioritizeRedditImages, redditImagePriority } from "./utils/redditMedia.js";
 import { normalizeUrl } from "./utils/url.js";
 
 const REDDIT_BLOCKED_METADATA_WARNING = "Reddit returned a verification/block page; metadata is incomplete.";
@@ -202,6 +203,7 @@ async function fetchPageWithStrategies(requestedUrl: string, options: FetchMetad
 async function fetchRedditPageWithStrategy(requestedUrl: string, options: FetchMetadataOptions): Promise<FetchStrategyResult> {
   const attempts: RedditFetchAttempt[] = [];
   const warnings: string[] = [];
+  const informationalFallbacks: string[] = [];
   const sourcePriority = ["redditJsonEndpoint", "oldReddit", "embeddedStructuredData", "openGraph", "html"];
   let lastError: unknown;
 
@@ -230,7 +232,7 @@ async function fetchRedditPageWithStrategy(requestedUrl: string, options: FetchM
 
       warnings.push("Reddit JSON endpoint responded, but no post payload could be extracted.");
     } else if (attempt.blocked) {
-      warnings.push("Reddit JSON endpoint appears to have blocked access.");
+      informationalFallbacks.push("Informational fallback: Reddit JSON endpoint appears to have blocked access; continuing with fallback extraction.");
     }
   }
 
@@ -245,7 +247,7 @@ async function fetchRedditPageWithStrategy(requestedUrl: string, options: FetchM
         page: attempt.page,
         fallbacksAttempted: attempts,
         warnings,
-        trace: ["retried Reddit page through old.reddit"],
+        trace: [...informationalFallbacks, "retried Reddit page through old.reddit"],
         sourcePriority,
         extractionMethod: "reddit:oldReddit",
         retryInfo: redditRetryInfo(attempts)
@@ -266,7 +268,7 @@ async function fetchRedditPageWithStrategy(requestedUrl: string, options: FetchM
       page: htmlAttempt.page,
       fallbacksAttempted: attempts,
       warnings,
-      trace: ["used Reddit HTML fallback"],
+      trace: [...informationalFallbacks, "used Reddit HTML fallback"],
       sourcePriority,
       extractionMethod: "reddit:htmlFallback",
       retryInfo: redditRetryInfo(attempts)
@@ -283,7 +285,7 @@ async function fetchRedditPageWithStrategy(requestedUrl: string, options: FetchM
       page: synthesizeRedditBlockedPage(requestedUrl, attempts, providerDiagnostics),
       fallbacksAttempted: attempts,
       warnings: uniqueStrings([...warnings, REDDIT_BLOCKED_METADATA_WARNING]),
-      trace: ["Reddit provider blocked metadata extraction"],
+      trace: [...informationalFallbacks, "Reddit provider blocked metadata extraction"],
       sourcePriority,
       extractionMethod: "reddit:blockedProvider",
       retryInfo: redditRetryInfo(attempts),
@@ -459,7 +461,10 @@ function findRedditPostRecord(value: unknown): Record<string, unknown> | undefin
 }
 
 function redditImagesFromPost(post: Record<string, unknown>): MediaAsset[] {
-  const images: MediaAsset[] = [];
+  const images: MediaAsset[] = [
+    ...redditGalleryImagesFromPost(post),
+    ...redditDirectImagesFromPost(post)
+  ];
   const preview = isRecord(post.preview) && Array.isArray(post.preview.images) ? post.preview.images : [];
 
   for (const image of preview) {
@@ -467,44 +472,198 @@ function redditImagesFromPost(post: Record<string, unknown>): MediaAsset[] {
       continue;
     }
 
-    for (const candidate of [image.source, ...(Array.isArray(image.resolutions) ? image.resolutions : [])]) {
-      if (!isRecord(candidate)) {
-        continue;
-      }
+    const source = redditImageFromRecord(image.source, "previewOriginal");
+    if (source) {
+      images.push(source);
+      continue;
+    }
 
-      const url = redditMediaUrl(stringFromUnknown(candidate.url));
-      if (!url) {
-        continue;
-      }
-
-      images.push({
-        url,
-        kind: "image",
-        source: "adapter",
-        width: numberFromUnknown(candidate.width),
-        height: numberFromUnknown(candidate.height),
-        metadata: {
-          adapter: "redditJsonEndpoint",
-          originalSource: "redditJsonEndpoint"
-        }
-      });
+    const fallbackResolution = largestRedditImageRecord(Array.isArray(image.resolutions) ? image.resolutions : []);
+    const fallback = redditImageFromRecord(fallbackResolution, "previewResolution");
+    if (fallback) {
+      images.push(fallback);
     }
   }
 
   const thumbnail = redditMediaUrl(stringFromUnknown(post.thumbnail));
   if (thumbnail && /^https?:\/\//i.test(thumbnail)) {
-    images.push({
-      url: thumbnail,
-      kind: "image",
-      source: "adapter",
-      metadata: {
-        adapter: "redditJsonEndpoint",
-        originalSource: "redditJsonEndpoint"
-      }
-    });
+    const thumbnailAsset = redditImageAsset(thumbnail, undefined, undefined, "thumbnail");
+    if (thumbnailAsset) {
+      images.push(thumbnailAsset);
+    }
   }
 
-  return images;
+  return dedupeRedditImages(prioritizeRedditImages(images));
+}
+
+function redditGalleryImagesFromPost(post: Record<string, unknown>): MediaAsset[] {
+  const mediaMetadata = isRecord(post.media_metadata) ? post.media_metadata : undefined;
+  if (!mediaMetadata) {
+    return [];
+  }
+
+  const galleryItems = isRecord(post.gallery_data) && Array.isArray(post.gallery_data.items) ? post.gallery_data.items : [];
+  const orderedIds = galleryItems
+    .map((item) => isRecord(item) ? stringFromUnknown(item.media_id) : undefined)
+    .filter((item): item is string => Boolean(item));
+  const seenIds = new Set<string>();
+  const assets: MediaAsset[] = [];
+
+  for (const id of orderedIds) {
+    const asset = redditImageFromMediaMetadata(mediaMetadata[id], id);
+    if (asset) {
+      assets.push(asset);
+      seenIds.add(id);
+    }
+  }
+
+  for (const [id, value] of Object.entries(mediaMetadata)) {
+    if (seenIds.has(id)) {
+      continue;
+    }
+
+    const asset = redditImageFromMediaMetadata(value, id);
+    if (asset) {
+      assets.push(asset);
+    }
+  }
+
+  return assets;
+}
+
+function redditDirectImagesFromPost(post: Record<string, unknown>): MediaAsset[] {
+  const url = redditMediaUrl(stringFromUnknown(post.url_overridden_by_dest) ?? stringFromUnknown(post.url));
+  if (!url || !isDirectRedditImageUrl(url)) {
+    return [];
+  }
+
+  const previewSource = previewSourceRecord(post);
+  const asset = redditImageAsset(
+    url,
+    numberFromUnknown(previewSource?.width),
+    numberFromUnknown(previewSource?.height),
+    "directImage"
+  );
+
+  return asset ? [asset] : [];
+}
+
+function redditImageFromMediaMetadata(value: unknown, mediaId: string): MediaAsset | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const source = isRecord(value.s) ? value.s : undefined;
+  const url = redditMediaUrl(
+    stringFromUnknown(source?.u) ??
+    stringFromUnknown(source?.gif) ??
+    stringFromUnknown(source?.mp4)
+  );
+
+  if (!url) {
+    return undefined;
+  }
+
+  const asset = redditImageAsset(
+    url,
+    numberFromUnknown(source?.x) ?? numberFromUnknown(source?.width),
+    numberFromUnknown(source?.y) ?? numberFromUnknown(source?.height),
+    "gallery",
+    stringFromUnknown(value.m)
+  );
+
+  return asset
+    ? {
+        ...asset,
+        metadata: {
+          ...asset.metadata,
+          redditMediaId: mediaId
+        }
+      }
+    : undefined;
+}
+
+function redditImageFromRecord(value: unknown, redditMediaKind: string): MediaAsset | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const url = redditMediaUrl(stringFromUnknown(value.url) ?? stringFromUnknown(value.u));
+  if (!url) {
+    return undefined;
+  }
+
+  return redditImageAsset(
+    url,
+    numberFromUnknown(value.width) ?? numberFromUnknown(value.x),
+    numberFromUnknown(value.height) ?? numberFromUnknown(value.y),
+    redditMediaKind
+  );
+}
+
+function redditImageAsset(
+  url: string,
+  width: number | undefined,
+  height: number | undefined,
+  redditMediaKind: string,
+  type?: string
+): MediaAsset | undefined {
+  const asset: MediaAsset = {
+    url,
+    kind: "image",
+    source: "adapter",
+    width,
+    height,
+    type,
+    metadata: {
+      adapter: "redditJsonEndpoint",
+      originalSource: "redditJsonEndpoint",
+      redditMediaKind
+    }
+  };
+
+  return isAllowedRedditImageCandidate(asset) ? asset : undefined;
+}
+
+function largestRedditImageRecord(values: unknown[]): unknown {
+  return values
+    .filter(isRecord)
+    .sort((left, right) =>
+      (numberFromUnknown(right.width) ?? 0) * (numberFromUnknown(right.height) ?? 0) -
+      (numberFromUnknown(left.width) ?? 0) * (numberFromUnknown(left.height) ?? 0)
+    )[0];
+}
+
+function previewSourceRecord(post: Record<string, unknown>): Record<string, unknown> | undefined {
+  const images = isRecord(post.preview) && Array.isArray(post.preview.images) ? post.preview.images : [];
+  const firstImage = images.find(isRecord);
+  return firstImage && isRecord(firstImage.source) ? firstImage.source : undefined;
+}
+
+function isDirectRedditImageUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    const host = parsed.hostname.toLowerCase();
+    return host === "i.redd.it" || host === "preview.redd.it";
+  } catch {
+    return false;
+  }
+}
+
+function dedupeRedditImages(images: MediaAsset[]): MediaAsset[] {
+  const seen = new Set<string>();
+  const unique: MediaAsset[] = [];
+
+  for (const image of images) {
+    if (seen.has(image.url)) {
+      continue;
+    }
+
+    seen.add(image.url);
+    unique.push(image);
+  }
+
+  return unique;
 }
 
 function redditVideosFromPost(post: Record<string, unknown>): MediaAsset[] {
@@ -536,7 +695,11 @@ function redditVideosFromPost(post: Record<string, unknown>): MediaAsset[] {
 
 function synthesizeRedditJsonPage(jsonPage: FetchedPage, requestedUrl: string, post: RedditPostPayload): FetchedPage {
   const finalUrl = post.canonicalUrl ?? requestedUrl;
-  const bestImage = post.images.sort((left, right) => ((right.width ?? 0) * (right.height ?? 0)) - ((left.width ?? 0) * (left.height ?? 0)))[0];
+  const bestImage = post.images.slice().sort(
+    (left, right) =>
+      redditImagePriority(right) - redditImagePriority(left) ||
+      ((right.width ?? 0) * (right.height ?? 0)) - ((left.width ?? 0) * (left.height ?? 0))
+  )[0];
   const video = post.videos[0];
   const structuredData = {
     "@context": "https://schema.org",

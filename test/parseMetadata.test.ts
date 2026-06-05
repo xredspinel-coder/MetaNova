@@ -79,4 +79,13 @@ describe("parseMetadata", () => {
       confidence: metadata.confidence
     });
   });
+
+  it("keeps empty media collections on normalized metadata", () => {
+    const metadata = parseMetadata("<title>No media</title>", "https://example.com/no-media");
+
+    expect(metadata.images).toEqual([]);
+    expect(metadata.videos).toEqual([]);
+    expect(metadata.audio).toEqual([]);
+    expect(metadata.favicons).toEqual([]);
+  });
 });

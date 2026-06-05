@@ -1,6 +1,6 @@
 {
   "name": "metanova",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "A modular TypeScript metadata extraction and normalization library for web pages and public URLs.",
   "type": "module",
   "main": "./dist/index.cjs",

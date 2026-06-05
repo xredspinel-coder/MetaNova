@@ -188,7 +188,7 @@ export const tiktokAdapter: SiteAdapter<PlatformRawData> = {
     return this.detect?.(url) ?? false;
   },
   extract(context) {
-    return socialVideoResult("tiktokAdapter", "TikTok", context);
+    return tiktokResult(context);
   },
   normalize(rawData) {
     return normalizePlatformResult(rawData);
@@ -442,25 +442,269 @@ function redditDescriptionFromContext(context: AdapterContext): TextSelection {
   return { value: context.raw.html.description, method: context.raw.html.description ? "reddit:html" : undefined };
 }
 
-function socialVideoResult(source: string, platform: string, context: AdapterContext): PlatformRawData {
+function tiktokResult(context: AdapterContext): PlatformRawData {
   const url = new URL(context.finalUrl);
   const username = url.pathname.match(/@([^/]+)/)?.[1];
   const postId = url.pathname.match(/\/(?:video|photo)\/([^/]+)/)?.[1] ?? url.pathname.split("/").filter(Boolean).at(-1);
+  const itemStruct = tiktokItemStructFromContext(context, postId);
+  const titleSelection = tiktokTitleFromContext(context, itemStruct, username);
+  const descriptionSelection = tiktokDescriptionFromContext(context, itemStruct);
+  const author = tiktokAuthorFromItemStruct(itemStruct, username);
+  const media = tiktokMediaFromContext(context, itemStruct);
+  const publishedTime = tiktokPublishedTime(itemStruct) ?? publishedTimeFromContext(context);
 
   return compactAdapterResult({
-    source,
-    platform,
+    source: "tiktokAdapter",
+    platform: "TikTok",
     type: "social_post",
-    siteName: platform,
+    siteName: "TikTok",
     canonicalUrl: context.raw.openGraph.url,
-    title: titleFromContext(context, ["title", "desc", "description", "caption"]),
-    description: descriptionFromContext(context),
-    images: markAdapterMedia(mediaFromContext(context).images, source),
-    videos: markAdapterMedia(mediaFromContext(context).videos, source),
-    author: username ? { name: username } : entityFromContext(context, ["author", "user", "creator", "owner"]),
-    article: { publishedTime: publishedTimeFromContext(context) },
-    identifiers: { username, postId }
+    title: titleSelection.value,
+    description: descriptionSelection.value,
+    images: markAdapterMedia(media.images, "tiktokAdapter"),
+    videos: markAdapterMedia(media.videos, "tiktokAdapter"),
+    author,
+    article: { publishedTime },
+    video: postId
+      ? {
+          id: postId,
+          title: titleSelection.value,
+          channel: author,
+          publishedTime,
+          duration: tiktokVideoDuration(itemStruct),
+          viewCount: tiktokStatCount(itemStruct, "playCount")
+        }
+      : undefined,
+    identifiers: { username, postId },
+    raw: {
+      extractionMethod: titleSelection.method ?? descriptionSelection.method ?? "tiktok:htmlFallback"
+    }
   });
+}
+
+function tiktokTitleFromContext(context: AdapterContext, itemStruct: JsonLdNode | undefined, username: string | undefined): TextSelection {
+  const desc = cleanTikTokText(stringFromUnknown(itemStruct?.desc));
+  if (desc) {
+    return { value: desc, method: "tiktok:itemStruct.desc" };
+  }
+
+  const musicTitle = tiktokMusicTitle(itemStruct);
+  if (musicTitle) {
+    return { value: musicTitle, method: "tiktok:itemStruct.music" };
+  }
+
+  const fallback = cleanTikTokText(titleFromContext(context, ["desc", "caption", "title", "description"]));
+  if (fallback) {
+    return { value: fallback, method: "tiktok:fallback" };
+  }
+
+  return {
+    value: username ? `TikTok post by @${username}` : undefined,
+    method: username ? "tiktok:urlFallback" : undefined
+  };
+}
+
+function tiktokDescriptionFromContext(context: AdapterContext, itemStruct: JsonLdNode | undefined): TextSelection {
+  const desc = cleanTikTokText(stringFromUnknown(itemStruct?.desc));
+  if (desc) {
+    return { value: desc, method: "tiktok:itemStruct.desc" };
+  }
+
+  return {
+    value: cleanTikTokText(descriptionFromContext(context)),
+    method: "tiktok:fallback"
+  };
+}
+
+function tiktokItemStructFromContext(context: AdapterContext, postId: string | undefined): JsonLdNode | undefined {
+  for (const item of context.raw.embeddedData.items) {
+    const defaultScope = isRecord(item.data["__DEFAULT_SCOPE__"]) ? item.data["__DEFAULT_SCOPE__"] : undefined;
+    const videoDetail = isRecord(defaultScope?.["webapp.video-detail"]) ? defaultScope["webapp.video-detail"] : undefined;
+    const itemInfo = isRecord(videoDetail?.itemInfo) ? videoDetail.itemInfo : undefined;
+    const itemStruct = isRecord(itemInfo?.itemStruct) ? itemInfo.itemStruct : undefined;
+
+    if (itemStruct && (!postId || stringFromUnknown(itemStruct.id) === postId)) {
+      return itemStruct;
+    }
+  }
+
+  let found: JsonLdNode | undefined;
+  for (const item of context.raw.embeddedData.items) {
+    walkData(item.data, (value, key) => {
+      if (found || key !== "itemStruct" || !isRecord(value)) {
+        return;
+      }
+
+      if (!postId || stringFromUnknown(value.id) === postId) {
+        found = value;
+      }
+    });
+
+    if (found) {
+      return found;
+    }
+  }
+
+  return undefined;
+}
+
+function tiktokMediaFromContext(context: AdapterContext, itemStruct: JsonLdNode | undefined): { images: MediaAsset[]; videos: MediaAsset[] } {
+  const discovered = mediaFromContext(context);
+
+  return {
+    images: [...tiktokImagesFromItemStruct(itemStruct), ...discovered.images],
+    videos: [...tiktokVideosFromItemStruct(itemStruct), ...discovered.videos]
+  };
+}
+
+function tiktokImagesFromItemStruct(itemStruct: JsonLdNode | undefined): MediaAsset[] {
+  const video = isRecord(itemStruct?.video) ? itemStruct.video : undefined;
+  if (!video) {
+    return [];
+  }
+
+  const width = numberFromUnknown(video.width);
+  const height = numberFromUnknown(video.height);
+  const candidates = [
+    stringFromUnknown(video.originCover),
+    stringFromUnknown(video.cover),
+    stringFromUnknown(video.dynamicCover),
+    ...urlsFromUnknown(video.shareCover)
+  ];
+
+  return uniqueStrings(candidates).map((url) => ({
+    url,
+    kind: "image",
+    source: "applicationJson",
+    width,
+    height,
+    metadata: {
+      tiktokMediaKind: "videoCover"
+    }
+  }));
+}
+
+function tiktokVideosFromItemStruct(itemStruct: JsonLdNode | undefined): MediaAsset[] {
+  const video = isRecord(itemStruct?.video) ? itemStruct.video : undefined;
+  if (!video) {
+    return [];
+  }
+
+  const width = numberFromUnknown(video.width);
+  const height = numberFromUnknown(video.height);
+  const candidates = [
+    stringFromUnknown(video.playAddr),
+    stringFromUnknown(video.downloadAddr),
+    ...urlsFromTikTokPlayAddr(video.PlayAddrStruct),
+    ...(Array.isArray(video.bitrateInfo)
+      ? video.bitrateInfo.flatMap((item) => (isRecord(item) ? urlsFromTikTokPlayAddr(item.PlayAddr) : []))
+      : [])
+  ];
+
+  return uniqueStrings(candidates)
+    .filter((url) => /^https?:\/\//i.test(url))
+    .map((url) => ({
+      url,
+      kind: "video",
+      source: "applicationJson",
+      width,
+      height,
+      type: "video/mp4",
+      metadata: {
+        tiktokMediaKind: "videoPlay"
+      }
+    }));
+}
+
+function urlsFromTikTokPlayAddr(value: unknown): string[] {
+  if (!isRecord(value)) {
+    return [];
+  }
+
+  return urlsFromUnknown(value.UrlList);
+}
+
+function tiktokAuthorFromItemStruct(itemStruct: JsonLdNode | undefined, username: string | undefined): Entity | undefined {
+  const author = isRecord(itemStruct?.author) ? itemStruct.author : undefined;
+  const name =
+    stringFromUnknown(author?.nickname) ??
+    stringFromUnknown(author?.uniqueId) ??
+    username;
+
+  if (!name) {
+    return undefined;
+  }
+
+  return {
+    name,
+    url: username ? `https://www.tiktok.com/@${username}` : undefined
+  };
+}
+
+function tiktokPublishedTime(itemStruct: JsonLdNode | undefined): string | undefined {
+  const created = numberFromUnknown(itemStruct?.createTime);
+  return created ? new Date(created * 1000).toISOString() : undefined;
+}
+
+function tiktokVideoDuration(itemStruct: JsonLdNode | undefined): string | undefined {
+  const video = isRecord(itemStruct?.video) ? itemStruct.video : undefined;
+  return stringFromUnknown(video?.duration);
+}
+
+function tiktokStatCount(itemStruct: JsonLdNode | undefined, key: string): number | undefined {
+  const stats = isRecord(itemStruct?.stats) ? itemStruct.stats : undefined;
+  return numberFromUnknown(stats?.[key]);
+}
+
+function tiktokMusicTitle(itemStruct: JsonLdNode | undefined): string | undefined {
+  const music = isRecord(itemStruct?.music) ? itemStruct.music : undefined;
+  const title = cleanTikTokText(stringFromUnknown(music?.title));
+  const author = cleanTikTokText(stringFromUnknown(music?.authorName));
+
+  if (!title) {
+    return undefined;
+  }
+
+  if (author && !/original sound/i.test(title)) {
+    return `${title} - ${author}`;
+  }
+
+  return title;
+}
+
+function cleanTikTokText(value: string | undefined): string | undefined {
+  const cleaned = value?.replace(/\s+/g, " ").trim();
+  if (!cleaned || isLowQualityTikTokText(cleaned)) {
+    return undefined;
+  }
+
+  return cleaned;
+}
+
+function isLowQualityTikTokText(value: string): boolean {
+  return (
+    /\{[^}]+\}/.test(value) ||
+    /tiktok\s*shop|free shipping|eligible items|exclusive collections/i.test(value) ||
+    /^tiktok live creator networks$/i.test(value) ||
+    /^tiktok\s*-\s*make your day$/i.test(value) ||
+    /^discover (?:new |popular )?videos?\b.*\btiktok\b/i.test(value)
+  );
+}
+
+function urlsFromUnknown(value: unknown): string[] {
+  if (typeof value === "string" && value.trim()) {
+    return [value.trim()];
+  }
+
+  if (Array.isArray(value)) {
+    return value.flatMap(urlsFromUnknown);
+  }
+
+  return [];
+}
+
+function uniqueStrings(values: Array<string | undefined>): string[] {
+  return [...new Set(values.filter((value): value is string => Boolean(value)))];
 }
 
 function normalizePlatformResult(rawData: PlatformRawData): AdapterExtractionResult {
